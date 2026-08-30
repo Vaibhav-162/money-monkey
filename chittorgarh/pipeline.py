@@ -16,7 +16,7 @@ from chittorgarh.export import (
     rebuild_master_xlsx,
     remove_legacy_outputs,
 )
-from chittorgarh.gmp import last_gmp_close, scrape_gmp
+from chittorgarh.gmp import last_gmp_close, scrape_gmp, scrape_gmp_with_page
 from chittorgarh.http import HttpClient
 from chittorgarh.parse_ipo import parse_ipo_html
 from chittorgarh.tracker import scrape_tracker
@@ -49,10 +49,16 @@ def scrape_one(
     row: dict[str, Any],
     fetch_gmp: bool = True,
     headless: bool = True,
+    use_cache: bool = True,
+    gmp_page: Any = None,
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     url = row["url"]
     ipo_id = str(row["ipo_id"])
-    html = client.get_text(url, cache_name=f"{ipo_id}.html")
+    html = client.get_text(
+        url,
+        cache_name=f"{ipo_id}.html" if use_cache else None,
+        use_cache=use_cache,
+    )
     parsed = parse_ipo_html(
         html,
         url=url,
@@ -65,7 +71,10 @@ def scrape_one(
     gmp_history: list[dict[str, Any]] = []
     if fetch_gmp:
         try:
-            gmp_history = scrape_gmp(url, ipo_id, headless=headless)
+            if gmp_page is not None:
+                gmp_history = scrape_gmp_with_page(gmp_page, url, ipo_id)
+            else:
+                gmp_history = scrape_gmp(url, ipo_id, headless=headless)
         except Exception as exc:
             warnings = master.get("parse_warnings") or ""
             extra = f"gmp_error:{exc}"
@@ -82,9 +91,22 @@ def scrape_one(
     return master, sats
 
 
+def persist_gmp_history(
+    out_dir: Path,
+    ipo_id: str,
+    history: list[dict[str, Any]],
+    dest: Path | None = None,
+) -> None:
+    if not history:
+        return
+    rows = [{**rec, "ipo_id": ipo_id} for rec in history]
+    append_or_replace(dest if dest is not None else out_dir / "gmp_history.csv", rows, key="ipo_id")
+
+
 def persist_one(out_dir: Path, master: dict[str, Any], sats: dict[str, list[dict[str, Any]]]) -> None:
     row = flatten_into_master(master, sats)
     append_master(out_dir, [row])
+    persist_gmp_history(out_dir, str(row.get("ipo_id")), sats.get("gmp_history") or [])
 
 
 def log_failure(out_dir: Path, row: dict[str, Any], error: str) -> None:

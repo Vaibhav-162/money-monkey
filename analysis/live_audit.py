@@ -1,0 +1,227 @@
+"""Forward-test ledger for close-day alerts (`data/live_audit_log.csv`)."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+AUDIT_COLUMNS = [
+    "timestamp_utc",
+    "ipo_id",
+    "company_name",
+    "board",
+    "close_date",
+    "url",
+    "price_band_high",
+    "issue_price",
+    "lot_size",
+    "gmp_rs",
+    "gmp_pct",
+    "sub_total_x",
+    "p_pop",
+    "p_allot",
+    "ev_retail",
+    "apply_s1",
+    "quality_score",
+    "apply_s2",
+    "quality_breakdown_json",
+    "s2_model_exret_pred",
+    "listing_date_expected",
+    "error",
+    "verified",
+    "actual_listing_open",
+    "actual_open_return_pct",
+    "actual_is_clean_pop",
+    "verified_at",
+]
+
+
+def _iso(value: Any) -> Any:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def to_score_row(master: dict[str, Any], close_date: str | None = None) -> dict[str, Any]:
+    """Map a live scrape master row onto score_features() inputs. S1/S2 schema unchanged."""
+    row = dict(master)
+    if row.get("gmp_at_close") is None or (isinstance(row.get("gmp_at_close"), float) and pd.isna(row["gmp_at_close"])):
+        row["gmp_at_close"] = row.get("gmp_rs")
+    if not row.get("listing_year"):
+        raw = close_date or row.get("ipo_close") or row.get("listing_date")
+        text = str(raw)[:4] if raw else ""
+        row["listing_year"] = int(text) if text.isdigit() else datetime.now(timezone.utc).year
+    return row
+
+
+def build_alert_record(
+    master: dict[str, Any],
+    score: dict[str, Any] | None,
+    discovery: dict[str, Any],
+    error: str | None = None,
+) -> dict[str, Any]:
+    breakdown = (score or {}).get("quality_breakdown") or []
+    rec = {col: None for col in AUDIT_COLUMNS}
+    rec.update(
+        {
+            "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ipo_id": str(discovery.get("ipo_id") or master.get("ipo_id") or ""),
+            "company_name": discovery.get("company_name") or master.get("company_name"),
+            "board": discovery.get("exchange_type") or master.get("exchange_type"),
+            "close_date": discovery.get("close_date") or _iso(master.get("ipo_close")),
+            "url": discovery.get("url") or master.get("url"),
+            "price_band_high": master.get("price_band_high"),
+            "issue_price": master.get("issue_price"),
+            "lot_size": master.get("lot_size"),
+            "gmp_rs": master.get("gmp_rs"),
+            "gmp_pct": master.get("gmp_pct"),
+            "sub_total_x": master.get("sub_total_x"),
+            "listing_date_expected": _iso(master.get("listing_date")),
+            "error": error,
+            "verified": False,
+        }
+    )
+    if score:
+        rec.update(
+            {
+                "p_pop": score.get("p_pop"),
+                "p_allot": score.get("p_allot"),
+                "ev_retail": score.get("ev_retail"),
+                "apply_s1": score.get("apply_s1"),
+                "quality_score": score.get("quality_score"),
+                "apply_s2": score.get("apply_s2"),
+                "quality_breakdown_json": json.dumps(breakdown, default=str),
+                "s2_model_exret_pred": score.get("s2_model_exret_pred"),
+            }
+        )
+    return rec
+
+
+def read_audit(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame(columns=AUDIT_COLUMNS)
+    frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+    for col in AUDIT_COLUMNS:
+        if col not in frame.columns:
+            frame[col] = ""
+    return frame[AUDIT_COLUMNS]
+
+
+def upsert_audit(path: Path, records: list[dict[str, Any]]) -> pd.DataFrame:
+    """Replace existing (ipo_id, close_date) rows; keep prior verification if re-scored same day."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    current = read_audit(path)
+    incoming = pd.DataFrame(records)
+    for col in AUDIT_COLUMNS:
+        if col not in incoming.columns:
+            incoming[col] = None
+    incoming = incoming[AUDIT_COLUMNS]
+    if current.empty:
+        incoming.to_csv(path, index=False)
+        return incoming
+    current["_key"] = current["ipo_id"].astype(str) + "|" + current["close_date"].astype(str)
+    incoming["_key"] = incoming["ipo_id"].astype(str) + "|" + incoming["close_date"].astype(str)
+    # Defensive: a hand-edited or previously-buggy CSV could contain duplicate
+    # keys, which would make prior.loc[key] return a DataFrame instead of a
+    # Series below and crash the scalar assignment. Keep the last occurrence.
+    current = current.drop_duplicates(subset="_key", keep="last")
+    prior = current.set_index("_key")
+    for key, row in incoming.iterrows():
+        old = prior.loc[row["_key"]] if row["_key"] in prior.index else None
+        if old is not None:
+            if str(old.get("verified", "")).lower() in {"true", "1", "yes"}:
+                incoming.at[key, "verified"] = old["verified"]
+                incoming.at[key, "actual_listing_open"] = old["actual_listing_open"]
+                incoming.at[key, "actual_open_return_pct"] = old["actual_open_return_pct"]
+                incoming.at[key, "actual_is_clean_pop"] = old["actual_is_clean_pop"]
+                incoming.at[key, "verified_at"] = old["verified_at"]
+    kept = current[~current["_key"].isin(set(incoming["_key"]))].drop(columns=["_key"])
+    fresh = incoming.drop(columns=["_key"])
+    parts = [p for p in (kept, fresh) if not p.empty]
+    out = pd.concat(parts, ignore_index=True) if parts else fresh
+    out.to_csv(path, index=False)
+    return out
+
+
+def write_audit(path: Path, frame: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for col in AUDIT_COLUMNS:
+        if col not in frame.columns:
+            frame[col] = None
+    frame[AUDIT_COLUMNS].to_csv(path, index=False)
+
+
+def listing_open_price(master: dict[str, Any]) -> float | None:
+    for key in ("listing_nse_open", "listing_bse_open", "list_open"):
+        val = pd.to_numeric(master.get(key), errors="coerce")
+        if pd.notna(val):
+            return float(val)
+    return None
+
+
+def listing_low_price(master: dict[str, Any]) -> float | None:
+    for key in ("listing_nse_low", "listing_bse_low", "list_low"):
+        val = pd.to_numeric(master.get(key), errors="coerce")
+        if pd.notna(val):
+            return float(val)
+    return None
+
+
+def compute_actuals(master: dict[str, Any]) -> dict[str, Any] | None:
+    """Return realized S1 fields once listing OHLC is on the detail page; else None.
+
+    actual_is_clean_pop is computed from the OPEN-price return, not the
+    close-day tracker gain (`listing_day_gain_pct`). That field is only ever
+    populated when a `tracker` dict is passed into `parse_ipo_html()`, which
+    a live re-fetch of the bare detail URL never does -- it would otherwise
+    stay None forever and silently lock every row as "verified" with a null
+    outcome. The open-price basis also matches the EV framework's own
+    "exit at listing open" assumption (see docs/codebase/live_alerts.md).
+    """
+    issue = pd.to_numeric(master.get("issue_price"), errors="coerce")
+    open_px = listing_open_price(master)
+    if pd.isna(issue) or issue <= 0 or open_px is None:
+        return None
+    low = listing_low_price(master)
+    open_ret = (open_px / float(issue) - 1.0) * 100.0
+    low_ok = low is None or low > float(issue)
+    clean = bool(open_ret >= 15 and low_ok)
+    return {
+        "actual_listing_open": open_px,
+        "actual_open_return_pct": open_ret,
+        "actual_is_clean_pop": clean,
+    }
+
+
+def performance_summary(frame: pd.DataFrame) -> dict[str, Any]:
+    if frame.empty:
+        return {"n_alerts": 0, "n_verified": 0}
+    verified = frame[frame["verified"].astype(str).str.lower().isin({"true", "1", "yes"})].copy()
+    applied = verified[verified["apply_s1"].astype(str).str.lower().isin({"true", "1", "yes"})]
+    pops = pd.to_numeric(applied["actual_is_clean_pop"], errors="coerce")
+    ev_pred = pd.to_numeric(applied["ev_retail"], errors="coerce")
+    ret = pd.to_numeric(applied["actual_open_return_pct"], errors="coerce")
+    p_allot = pd.to_numeric(applied["p_allot"], errors="coerce")
+    issue = pd.to_numeric(applied["issue_price"], errors="coerce")
+    lot = pd.to_numeric(applied["lot_size"], errors="coerce")
+    realized_ev = p_allot * (ret / 100.0) * lot * issue
+    q = pd.to_numeric(verified["quality_score"], errors="coerce")
+    s2_pass = verified[q >= 3]
+    s2_ret = pd.to_numeric(s2_pass["actual_open_return_pct"], errors="coerce")
+    return {
+        "n_alerts": int(len(frame)),
+        "n_verified": int(len(verified)),
+        "n_apply_s1_verified": int(len(applied)),
+        "realized_precision_apply_s1": None if pops.dropna().empty else float(pops.mean()),
+        "mean_ev_predicted_apply_s1": None if ev_pred.dropna().empty else float(ev_pred.mean()),
+        "mean_realized_ev_proxy_apply_s1": None if realized_ev.dropna().empty else float(realized_ev.mean()),
+        "n_s2_pass_verified": int(len(s2_pass)),
+        "s2_pass_mean_open_return_pct": None if s2_ret.dropna().empty else float(s2_ret.mean()),
+        "note": "Live forward-test, not investment advice. S2 listing-day return is not the 6-month target.",
+    }

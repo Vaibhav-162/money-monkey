@@ -1,0 +1,42 @@
+name: Verify IPO listing outcomes
+
+on:
+  schedule:
+    - cron: "15 4 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify listing-day outcomes
+        run: python scripts/verify_outcomes.py --out data
+
+      - name: Commit verification
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for f in data/live_audit_log.csv data/analysis/live_performance.json; do
+            [ -f "$f" ] && git add "$f"
+          done
+          if git diff --staged --quiet; then
+            echo "no verification changes"
+            exit 0
+          fi
+          git commit -m "chore: update live IPO outcome verification"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push

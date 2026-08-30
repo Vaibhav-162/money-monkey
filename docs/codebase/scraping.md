@@ -23,9 +23,16 @@ Golden smoke IPO: **Lohia Corp**, `ipo_id=2574`, listed 2026-07-30, `/ipo/lohia-
 
 ## Browser
 
-`browser.chromium_page` launches Chromium and always closes context + browser in `finally`, including on errors. Tracker and GMP both use it. Do not leave Playwright browsers running in the background.
+`browser.chromium_page` launches Chromium, yields one page, and always closes context + browser in `finally`. Tracker and the one-shot `scrape_gmp()` still use it.
+
+`browser.chromium_session` launches one browser + context and yields the context. The GMP history re-scrape (`scripts/rescrape_gmp_history.py`) opens **one session per shard** and a new Page per IPO, then closes that page in `finally`. Do not leave Playwright browsers running in the background.
 
 HTTP uses a 1.5s delay by default, one thread.
+
+GMP history re-scrape and post-listing price fetch can run as process shards
+(`--workers N`). Each worker writes its own files (`data/gmp_parts/shard_XX.csv`
+or `data/prices/daily/{ipo_id}.parquet`); the parent merges afterward. Do not
+point two workers at the same CSV.
 
 ## Resume
 

@@ -551,11 +551,20 @@ def load_done_ids(path: Path) -> set[str]:
     return {str(v) for v in df["ipo_id"] if str(v) not in {"", "nan", "None", "IPO ID"}}
 
 
+def _cell_empty(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and pd.isna(value):
+        return True
+    text = str(value).strip()
+    return text in {"", "None", "nan", "NaN", "NaT", "<NA>"}
+
+
 def coverage_report(masters: list[dict[str, Any]]) -> str:
     n = len(masters) or 1
 
     def pct(field: str) -> str:
-        c = sum(1 for m in masters if m.get(field) not in (None, "", float("nan")))
+        c = sum(1 for m in masters if not _cell_empty(m.get(field)))
         return f"{c}/{len(masters)} ({100 * c / n:.1f}%)"
 
     lines = [

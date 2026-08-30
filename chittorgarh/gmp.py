@@ -6,6 +6,7 @@ import re
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from chittorgarh.browser import chromium_page
@@ -80,14 +81,21 @@ def _parse_gmp_rows(rows: list[list[str]], ipo_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def last_gmp_close(history: list[dict[str, Any]], listing_date: Optional[str] = None) -> dict[str, Any]:
+def last_gmp_on_or_before(
+    history: list[dict[str, Any]],
+    as_of: Optional[str] = None,
+) -> dict[str, Any]:
+    """Last GMP observation with gmp_date <= as_of. Empty as_of = last row in history."""
     if not history:
         return {}
     rows = [r for r in history if r.get("gmp_date")]
-    if listing_date:
-        rows = [r for r in rows if r["gmp_date"] <= listing_date] or rows
+    if as_of:
+        bounded = [r for r in rows if str(r["gmp_date"]) <= str(as_of)]
+        rows = bounded if bounded else []
+    if not rows:
+        return {}
     rows.sort(key=lambda r: r.get("gmp_date") or "")
-    last = rows[-1] if rows else history[-1]
+    last = rows[-1]
     return {
         "gmp_close_date": last.get("gmp_date"),
         "gmp_rs": last.get("gmp_rs"),
@@ -95,31 +103,61 @@ def last_gmp_close(history: list[dict[str, Any]], listing_date: Optional[str] = 
         "gmp_est_listing_price": last.get("gmp_est_listing_price"),
         "kostak_rs": last.get("kostak_rs"),
         "subject_to_sauda": last.get("subject_to_sauda"),
+        "gmp_date_raw": last.get("gmp_date_raw"),
     }
 
 
+def last_gmp_close(history: list[dict[str, Any]], listing_date: Optional[str] = None) -> dict[str, Any]:
+    """Backward-compatible wrapper. Prefer last_gmp_on_or_before(ipo_close) for scoring.
+
+    Fallback (only hit when listing_date is before every recorded GMP date, or rows
+    lack a usable date) reuses last_gmp_on_or_before with as_of=None, which sorts by
+    gmp_date and takes the latest row -- not history[-1], since parsed tables are
+    newest-first and that used to silently return the *oldest* row instead.
+    """
+    out = last_gmp_on_or_before(history, listing_date)
+    if out:
+        return out
+    return last_gmp_on_or_before(history, None)
+
+
+def scrape_gmp_with_page(
+    page: Page,
+    url: str,
+    ipo_id: str,
+    timeout_ms: int = 45000,
+) -> list[dict[str, Any]]:
+    """Scrape GMP history using an already-open Playwright page."""
+    return _scrape_gmp_page(page, url, ipo_id, timeout_ms)
+
+
 def scrape_gmp(url: str, ipo_id: str, timeout_ms: int = 45000, headless: bool = True) -> list[dict[str, Any]]:
+    """One-shot scrape: launches and closes its own Chromium page."""
+    with chromium_page(headless=headless) as page:
+        return _scrape_gmp_page(page, url, ipo_id, timeout_ms)
+
+
+def _scrape_gmp_page(page: Page, url: str, ipo_id: str, timeout_ms: int) -> list[dict[str, Any]]:
     target = investorgain_gmp_url(url, ipo_id)
     history: list[dict[str, Any]] = []
-    with chromium_page(headless=headless) as page:
-        page.goto(target, wait_until="domcontentloaded", timeout=timeout_ms)
-        try:
-            page.wait_for_selector("table tr", timeout=12000)
-        except PlaywrightTimeout:
-            pass
-        page.wait_for_timeout(1500)
-        if "ipo-gmp-live" in page.url.lower() or "/report/ipo-gmp-live" in page.url.lower():
-            return []
-        for table in page.locator("table").all():
-            rows: list[list[str]] = []
-            for tr in table.locator("tr").all():
-                cells = [clean_text(c.inner_text()) for c in tr.locator("th, td").all()]
-                if any(cells):
-                    rows.append(cells)
-            if not _looks_like_gmp_table(rows):
-                continue
-            parsed = _parse_gmp_rows(rows, ipo_id)
-            if parsed:
-                history = parsed
-                break
+    page.goto(target, wait_until="domcontentloaded", timeout=timeout_ms)
+    try:
+        page.wait_for_selector("table tr", timeout=12000)
+    except PlaywrightTimeout:
+        pass
+    page.wait_for_timeout(1500)
+    if "ipo-gmp-live" in page.url.lower() or "/report/ipo-gmp-live" in page.url.lower():
+        return []
+    for table in page.locator("table").all():
+        rows: list[list[str]] = []
+        for tr in table.locator("tr").all():
+            cells = [clean_text(c.inner_text()) for c in tr.locator("th, td").all()]
+            if any(cells):
+                rows.append(cells)
+        if not _looks_like_gmp_table(rows):
+            continue
+        parsed = _parse_gmp_rows(rows, ipo_id)
+        if parsed:
+            history = parsed
+            break
     return history
