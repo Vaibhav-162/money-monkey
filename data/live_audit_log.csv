@@ -1,0 +1,1 @@
+timestamp_utc,ipo_id,company_name,board,close_date,url,price_band_high,issue_price,lot_size,gmp_rs,gmp_pct,sub_total_x,p_pop,p_allot,ev_retail,apply_s1,quality_score,apply_s2,quality_breakdown_json,s2_model_exret_pred,listing_date_expected,error,verified,actual_listing_open,actual_open_return_pct,actual_is_clean_pop,verified_at

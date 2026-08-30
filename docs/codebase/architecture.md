@@ -18,9 +18,13 @@ CLI entry: `scrape_ipos.py`. Package: `chittorgarh/`.
 | `scrape_ipos.py` | CLI flags (`--smoke`, `--from-year`, `--resume`, `--out`) |
 | `pipeline.py` | Index → fetch → parse → persist; resume via `ipo_id` already in `ipos.csv` |
 | `tracker.py` | Performance tracker index |
+| `live_dashboard.py` | Current open/close IPO table (static HTML, no Playwright) |
 | `parse_ipo.py` | Detail-page parser, SME-tolerant missing sections |
 | `gmp.py` | Per-IPO GMP tab |
+| `shards.py` | Round-robin worker split + CSV merge for GMP/price jobs |
 | `export.py` | Master sheet columns, flatten, read/write, leftover-file cleanup |
+| `analysis/` | Scoring pipeline (see [analysis.md](analysis.md)) and live audit ledger |
+| `scripts/live_scanner.py` | Close-day discover → score → alert (see [live_alerts.md](live_alerts.md)) |
 | `http.py` | Polite HTTP + disk cache |
 | `browser.py` | Playwright Chromium that always closes |
 | `normalize.py` | Dates, Indian commas, crore, price bands |

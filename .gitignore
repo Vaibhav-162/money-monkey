@@ -2,7 +2,13 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-data/
+data/*
+!data/live_audit_log.csv
+!data/analysis/
+data/analysis/*
+!data/analysis/live_performance.json
+!data/analysis/models/
+.cache/
 *.egg-info/
 .pytest_cache/
 .playwright-browsers/

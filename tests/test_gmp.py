@@ -1,4 +1,4 @@
-from chittorgarh.gmp import _parse_gmp_rows, investorgain_gmp_url, last_gmp_close
+from chittorgarh.gmp import _parse_gmp_rows, investorgain_gmp_url, last_gmp_close, last_gmp_on_or_before
 
 
 def test_investorgain_url() -> None:
@@ -20,3 +20,20 @@ def test_parse_investorgain_gmp_table() -> None:
     close = last_gmp_close(parsed, "2026-07-30")
     assert close["gmp_close_date"] == "2026-07-30"
     assert close["gmp_rs"] == 17
+    at_close = last_gmp_on_or_before(parsed, "2026-07-28")
+    assert at_close == {}
+    eve = last_gmp_on_or_before(parsed, "2026-07-29")
+    assert eve["gmp_close_date"] == "2026-07-29"
+    assert eve["gmp_rs"] == 17
+
+
+def test_last_gmp_close_fallback_picks_latest_not_last_list_element():
+    # Table is newest-first (as investorgain renders it), so history[-1] would be
+    # the OLDEST row -- the fallback must sort by date and pick the latest one.
+    history = [
+        {"gmp_date": "2026-07-30", "gmp_rs": 20},
+        {"gmp_date": "2026-07-29", "gmp_rs": 17},
+    ]
+    out = last_gmp_close(history, "2026-07-01")  # as_of before every recorded date
+    assert out["gmp_close_date"] == "2026-07-30"
+    assert out["gmp_rs"] == 20
