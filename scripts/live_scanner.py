@@ -117,7 +117,7 @@ def run_scan(
         ).format(day.isoformat())
         print(f"[scan] WARNING {msg}")
         if not dry_run:
-            send_failure_alert(msg)
+            send_failure_alert(msg, state_path=out_dir / "live_alert_state.json")
 
     candidates = _select_candidates(discovered, day, include_open)
     print(f"[scan] as_of={day.isoformat()} discovered={len(discovered)} candidates={len(candidates)}")
@@ -164,7 +164,7 @@ def run_scan(
         to_alert = records_needing_alert(records, prior)
         skipped = len(records) - len(to_alert)
         if skipped:
-            print(f"[scan] skip {skipped} unchanged alert(s) (gmp_rs/sub_total_x match audit)")
+            print(f"[scan] skip {skipped} alert(s) with an existing audit row (already alerted)")
         upsert_audit(audit_path, records)
         print(f"[scan] wrote {audit_path}")
     dispatch(to_alert, dry_run=dry_run)
@@ -194,7 +194,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 0
     except Exception:
-        send_failure_alert(traceback.format_exc())
+        send_failure_alert(
+            traceback.format_exc(),
+            state_path=Path(args.out) / "live_alert_state.json",
+        )
         raise
 
 

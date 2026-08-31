@@ -29,9 +29,12 @@ exists only on a feature branch will not fire cron.
    5:00 PM exchange close. Cards are **live snapshots**, not the final
    close-day print — GMP/Sub can still move in the last hour.
 2. **16:00 IST (10:30 UTC) weekdays** — the same workflow's catch-up tick.
-   If the 3:30 run already wrote matching `gmp_rs` and `sub_total_x` for
-   that `(ipo_id, close_date)`, Telegram/email are skipped (no spam). If
-   GitHub dropped the first tick, or numbers moved, the catch-up alerts.
+   Re-alerts only for a candidate that has **no** audit row at all from the
+   3:30 run (a dropped tick, or a brand-new close-today listing). It no
+   longer re-sends because GMP/Sub moved or a decision flipped. Failure
+   alerts (Telegram+email) fire at most once per IST calendar day,
+   persisted in `data/live_alert_state.json`, which the workflow commits
+   even when the scan step fails.
 3. IPOs with `close_date == today (IST)` are scraped and passed through
    `to_score_row()` → `score_features()`. Strategy 1 `p_allot` still uses
    Chittorgarh `sub_total_x` (the training source). InvestorGain
@@ -75,8 +78,19 @@ Windows `set VAR="value"` secrets).
    re-fetches detail pages for IPOs that closed 1–4 IST days ago. The
    primary "allotment out" signal is a Basis of Allotment link/heading
    (confirmed on listed pages such as Lohia Corp). If that is absent, the
-   expected timetable `allotment_date` is the fallback. Cards name the
-   registrar and link to a public portal — never a PAN scrape.
+   expected timetable `allotment_date` is the fallback.
+
+   If the `PAN_PROFILES` secret is set, the job then tries an automated
+   PAN lookup on **KFintech** and **MUFG Intime / Link Intime** (Playwright
+   + local Tesseract OCR for the registrar captcha). Each profile is emailed
+   Allotted / Not allotted at their own address from the shared `GMAIL_USER`
+   sender. Personalized PAN emails are only sent for a confirmed Allotted
+   or Not allotted result; a captcha miss, unmatched company, unsupported
+   registrar, or "no application found" result stays silent (no email, and
+   Telegram is skipped too if nobody in that batch was emailed). Telegram
+   gets counts only. Full PANs never go to git, the audit CSV, GitHub logs,
+   or Telegram. Unset `PAN_PROFILES` keeps the original single generic
+   "allotment out" card.
 
 Both workflows `git pull --rebase` before pushing, using `GITHUB_TOKEN` and
 `permissions: contents: write`.
@@ -112,6 +126,22 @@ audit log or send messages.
 | `TELEGRAM_CHAT_ID` | recommended | Message the bot, then `https://api.telegram.org/bot<token>/getUpdates` |
 | `GMAIL_USER` | optional | Gmail address |
 | `GMAIL_APP_PASSWORD` | optional | Google app password (not the account password) |
+| `PAN_PROFILES` | optional | JSON array of `{label, pan, email}` for personalized allotment results |
+
+`PAN_PROFILES` example (GitHub secret value, not a repo file):
+
+```json
+[
+  {"label": "Dad", "pan": "ABCDE1234F", "email": "dad@example.com"},
+  {"label": "Me", "pan": "PQRST5678G", "email": "me@example.com"}
+]
+```
+
+One shared `GMAIL_USER` sends each person's result to that profile's
+`email`. PANs and personal emails must stay in GitHub Secrets — never
+commit them, never write them to `data/live_audit_log.csv`. Registrar
+captchas mean lookup is best-effort (KFintech and MUFG Intime only in v1);
+a miss still emails a manual portal link.
 
 Local Windows CMD: `set GMAIL_USER=you@gmail.com` — do **not** wrap the
 value in quotes. `set VAR="value"` stores the quote characters, and Gmail
@@ -155,3 +185,6 @@ be committed.
 - Allotment "published" is inferred from page HTML plus the timetable date.
   The date can slip a day; the Basis of Allotment heading is the stronger
   signal. Registrar portals are a static map with a Chittorgarh fallback.
+  Automated PAN lookup (KFintech / MUFG Intime) solves a captcha with
+  Tesseract and can miss; the job then emails a manual link instead of
+  failing silent.

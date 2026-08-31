@@ -1,4 +1,7 @@
+import json
 import smtplib
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from scripts.notify import (
     _app_password,
@@ -6,10 +9,13 @@ from scripts.notify import (
     _redact,
     dispatch,
     format_allotment_card,
+    format_allotment_result_email,
+    format_allotment_telegram_summary,
     format_card,
     format_email_digest,
     registrar_portal_url,
     send_email,
+    send_failure_alert,
     send_telegram,
 )
 
@@ -278,8 +284,49 @@ def test_allotment_card_and_registrar_map() -> None:
     assert "ALLOTMENT OUT: Lumino Industries" in card
     assert "MUFG Intime" in card
     assert "linkintime.co.in" in card
+    labeled = format_allotment_card(
+        {"company_name": "Lumino Industries", "registrar": "KFin", "label": "Dad"}
+    )
+    assert labeled.startswith("Hi Dad,")
     assert registrar_portal_url("KFin Technologies") == "https://kosmic.kfintech.com/ipostatus/"
     assert registrar_portal_url("Unknown House") == "https://www.chittorgarh.com/ipo_allotment_status/"
+
+
+def test_allotment_result_email_never_includes_pan() -> None:
+    html = format_allotment_result_email(
+        label="Dad",
+        company="Kwick Forensic Solutions",
+        registrar="KFin Technologies",
+        status="allotted",
+        shares=1600,
+    )
+    assert "Hi Dad," in html
+    assert "ALLOTTED" in html
+    assert "1600" in html
+    assert "ABCDE" not in html
+    assert "PAN" not in html
+    skipped = format_allotment_result_email(
+        label="Me", company="Kwick", registrar="KFin", status="not_allotted"
+    )
+    assert "NOT ALLOTTED" in skipped
+    missing = format_allotment_result_email(
+        label="Me", company="Kwick", registrar="KFin", status="no_application"
+    )
+    assert "NO APPLICATION FOUND" in missing
+
+
+def test_allotment_telegram_summary_is_counts_only() -> None:
+    text = format_allotment_telegram_summary(
+        {"company_name": "Kwick Forensic Solutions", "registrar": "KFin"},
+        n_profiles=2,
+        n_emailed=1,
+        n_skipped=1,
+    )
+    assert "Checked 2 PAN(s): 1 emailed, 1 skipped." in text
+    assert "ABCDE1234F" not in text
+    assert "ALLOTTED" not in text
+    assert "Dad" not in text
+    assert "1600" not in text
 
 
 def test_dispatch_one_email_even_on_auth_failure(monkeypatch) -> None:
@@ -293,3 +340,41 @@ def test_dispatch_one_email_even_on_auth_failure(monkeypatch) -> None:
     monkeypatch.setattr("scripts.notify.send_email", boom)
     dispatch([_record(company_name="A"), _record(company_name="B")], dry_run=False)
     assert len(email_subjects) == 1
+
+
+def test_send_failure_alert_dedupes_within_same_ist_day(tmp_path, monkeypatch) -> None:
+    telegrams: list[str] = []
+    emails: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "scripts.notify.send_telegram", lambda text, **kw: telegrams.append(text) or True
+    )
+    monkeypatch.setattr(
+        "scripts.notify.send_email",
+        lambda subject, body, **kw: emails.append((subject, body)) or True,
+    )
+    state = tmp_path / "live_alert_state.json"
+    send_failure_alert("boom", state_path=state)
+    send_failure_alert("boom", state_path=state)
+    assert len(telegrams) == 1
+    assert len(emails) == 1
+    assert state.exists()
+    payload = json.loads(state.read_text(encoding="utf-8"))
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    assert payload["failure_alerted_ist"] == today
+
+
+def test_send_failure_alert_sends_again_on_new_ist_day(tmp_path, monkeypatch) -> None:
+    telegrams: list[str] = []
+    emails: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "scripts.notify.send_telegram", lambda text, **kw: telegrams.append(text) or True
+    )
+    monkeypatch.setattr(
+        "scripts.notify.send_email",
+        lambda subject, body, **kw: emails.append((subject, body)) or True,
+    )
+    state = tmp_path / "live_alert_state.json"
+    state.write_text(json.dumps({"failure_alerted_ist": "2020-01-01"}), encoding="utf-8")
+    send_failure_alert("boom", state_path=state)
+    assert len(telegrams) == 1
+    assert len(emails) == 1

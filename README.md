@@ -124,8 +124,12 @@ Weekday crons run on **`main` only** (UTC):
 
 - `0 10 * * 1-5` = **3:30 PM IST** primary close-day scan (still inside the
   bidding window; most broker UPI cutoffs are 4:00–4:30 PM IST).
-- `30 10 * * 1-5` = **4:00 PM IST** catch-up. Skips Telegram/email if
-  `gmp_rs` and `sub_total_x` are unchanged vs the audit row.
+- `30 10 * * 1-5` = **4:00 PM IST** catch-up. Re-alerts only for a candidate
+  that has no audit row at all from the 3:30 run (a dropped tick, or a
+  brand-new close-today listing) — it no longer re-sends because GMP/Sub
+  moved or a decision flipped. Failure alerts (Telegram+email) fire at
+  most once per IST calendar day, persisted in `data/live_alert_state.json`
+  which the workflow commits even when the scan step fails.
 - `15 4 * * 1-5` = 9:45 AM IST listing-day verification.
 - `30 6 * * 1-5` = 12:00 PM IST allotment-out check.
 
@@ -138,7 +142,15 @@ a separate email-login problem; they do not explain a missing schedule.
 Repo setup: Settings → Actions → General → Workflow permissions →
 **Read and write**. Add secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 (create a bot with @BotFather, message it once, then call `getUpdates`).
-Optional: `GMAIL_USER` and `GMAIL_APP_PASSWORD`.
+Optional: `GMAIL_USER` and `GMAIL_APP_PASSWORD` (one shared sender).
+Optional: `PAN_PROFILES` JSON (`label` / `pan` / `email`) for per-person
+allotment emails. Lookup is best-effort on KFintech and MUFG Intime only
+(captcha OCR). Personalized PAN emails are only sent for a confirmed
+Allotted or Not allotted result; a captcha miss, unmatched company,
+unsupported registrar, or "no application found" result stays silent
+(no email, and Telegram is skipped too if nobody in that batch was emailed).
+PANs and personal emails never belong in the repo — GitHub Secrets
+only. Details: [docs/codebase/live_alerts.md](docs/codebase/live_alerts.md).
 
 On Windows CMD, do **not** quote values (`set GMAIL_USER=you@gmail.com`).
 Quoted `set VAR="value"` stores the quotes, which Gmail rejects as 535.
