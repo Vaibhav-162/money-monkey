@@ -47,6 +47,18 @@ def _header_index(header: list[str], *names: str) -> Optional[int]:
     return None
 
 
+def _subscription_header_index(header: list[str]) -> Optional[int]:
+    """InvestorGain 'Subscription' column — never 'Subject to Sauda'."""
+    normed = [clean_text(h).lower() for h in header]
+    for i, h in enumerate(normed):
+        if h == "subscription" or h == "sub":
+            return i
+    for i, h in enumerate(normed):
+        if "subscription" in h and "sauda" not in h and "subject" not in h:
+            return i
+    return None
+
+
 def _parse_gmp_rows(rows: list[list[str]], ipo_id: str) -> list[dict[str, Any]]:
     if not rows:
         return []
@@ -57,6 +69,8 @@ def _parse_gmp_rows(rows: list[list[str]], ipo_id: str) -> list[dict[str, Any]]:
     est_i = _header_index(header, "est. listing price", "estimated listing", "est. listing")
     kostak_i = _header_index(header, "kostak")
     sub_i = _header_index(header, "subject to sauda", "sauda")
+    sub_ig_i = _subscription_header_index(header)
+    updated_i = _header_index(header, "last updated")
 
     out: list[dict[str, Any]] = []
     for row in rows[1:]:
@@ -75,6 +89,8 @@ def _parse_gmp_rows(rows: list[list[str]], ipo_id: str) -> list[dict[str, Any]]:
             "gmp_est_listing_price": parse_number(row[est_i] if est_i is not None and est_i < len(row) else None),
             "kostak_rs": parse_number(row[kostak_i] if kostak_i is not None and kostak_i < len(row) else None),
             "subject_to_sauda": parse_number(row[sub_i] if sub_i is not None and sub_i < len(row) else None),
+            "sub_ig_x": parse_number(row[sub_ig_i] if sub_ig_i is not None and sub_ig_i < len(row) else None),
+            "gmp_last_updated": clean_text(row[updated_i]) if updated_i is not None and updated_i < len(row) else None,
         }
         if rec["gmp_date"] or rec["gmp_rs"] is not None:
             out.append(rec)
@@ -103,7 +119,9 @@ def last_gmp_on_or_before(
         "gmp_est_listing_price": last.get("gmp_est_listing_price"),
         "kostak_rs": last.get("kostak_rs"),
         "subject_to_sauda": last.get("subject_to_sauda"),
+        "sub_ig_x": last.get("sub_ig_x"),
         "gmp_date_raw": last.get("gmp_date_raw"),
+        "gmp_last_updated": last.get("gmp_last_updated"),
     }
 
 

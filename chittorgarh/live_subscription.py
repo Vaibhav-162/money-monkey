@@ -27,38 +27,62 @@ def _cell_text(cell: Optional[Tag]) -> str:
 
 def parse_subscription_html(html: str) -> dict[str, Any]:
     soup = BeautifulSoup(html, "lxml")
-    out: dict[str, Any] = {
+    empty: dict[str, Any] = {
         "sub_qib_x": None,
         "sub_nii_x": None,
         "sub_retail_x": None,
         "sub_total_x": None,
     }
+    best = dict(empty)
+    best_score = -1
     for table in soup.find_all("table"):
         rows = []
         for tr in table.find_all("tr"):
             cells = [_cell_text(c) for c in tr.find_all(["th", "td"])]
             if any(cells):
                 rows.append(cells)
-        if not rows:
+        parsed = _parse_subscription_table(rows)
+        if parsed is None:
             continue
-        header = " ".join(c.lower() for c in rows[0])
-        if "subscription" not in header or "times" not in header:
+        score = sum(parsed[k] is not None for k in empty)
+        if score > best_score:
+            best_score = score
+            best = parsed
+    return best
+
+
+def _parse_subscription_table(rows: list[list[str]]) -> Optional[dict[str, Any]]:
+    """Parse one table. Skip day-wise Date/Total tables in favour of live category rows."""
+    if not rows:
+        return None
+    header = " ".join(c.lower() for c in rows[0])
+    if "subscription" not in header or "times" not in header:
+        return None
+    # Day-wise history tables are headed "Date | ... | Subscription (times)"
+    # and would otherwise win via `break` on the first Total row.
+    if "date" in header and "category" not in header and "investor" not in header:
+        return None
+    out: dict[str, Any] = {
+        "sub_qib_x": None,
+        "sub_nii_x": None,
+        "sub_retail_x": None,
+        "sub_total_x": None,
+    }
+    for row in rows[1:]:
+        if not row:
             continue
-        for row in rows[1:]:
-            if not row:
-                continue
-            label = row[0].lower()
-            val = parse_number(row[1] if len(row) > 1 else None)
-            if "total" in label:
-                out["sub_total_x"] = val
-            elif "retail" in label or "individual" in label:
-                out["sub_retail_x"] = val
-            elif "qib" in label or "qualified institutional" in label:
-                out["sub_qib_x"] = val
-            elif "nii" in label or "non institutional" in label:
-                out["sub_nii_x"] = val
-        if out["sub_total_x"] is not None:
-            break
+        label = row[0].lower()
+        val = parse_number(row[1] if len(row) > 1 else None)
+        if "total" in label:
+            out["sub_total_x"] = val
+        elif "retail" in label or "individual" in label:
+            out["sub_retail_x"] = val
+        elif "qib" in label or "qualified institutional" in label:
+            out["sub_qib_x"] = val
+        elif "nii" in label or "non institutional" in label:
+            out["sub_nii_x"] = val
+    if all(v is None for v in out.values()):
+        return None
     return out
 
 

@@ -4,6 +4,8 @@ from analysis.live_audit import (
     build_alert_record,
     compute_actuals,
     performance_summary,
+    records_needing_alert,
+    scrape_timestamps,
     to_score_row,
     upsert_audit,
 )
@@ -58,6 +60,122 @@ def test_build_alert_record_keys() -> None:
     assert rec["apply_s1"] == score["apply_s1"]
     assert rec["verified"] is False
     assert rec["quality_breakdown_json"]
+
+
+def test_build_alert_record_copies_qib_and_registrar() -> None:
+    rec = build_alert_record(
+        {**MASTER, "sub_qib_x": 9.11, "registrar": "MUFG Intime", "allotment_date": "2026-09-02"},
+        None,
+        {"ipo_id": "2013", "close_date": "2026-08-31", "company_name": "Lumino", "exchange_type": "mainboard"},
+    )
+    assert rec["sub_qib_x"] == 9.11
+    assert rec["registrar"] == "MUFG Intime"
+    assert rec["allotment_date"] == "2026-09-02"
+
+
+def test_build_alert_record_copies_scraped_at_and_sub_ig() -> None:
+    rec = build_alert_record(
+        {
+            **MASTER,
+            "scraped_at_utc": "2026-08-31T10:11:00Z",
+            "scraped_at_ist": "31-Aug 15:41 IST",
+            "gmp_close_date": "2026-08-31",
+            "gmp_date_raw": "31-08-2026 Close",
+            "sub_ig_x": 97.92,
+        },
+        None,
+        {"ipo_id": "2013", "close_date": "2026-08-31", "company_name": "Lumino", "exchange_type": "mainboard"},
+    )
+    assert rec["scraped_at_utc"] == "2026-08-31T10:11:00Z"
+    assert rec["scraped_at_ist"] == "31-Aug 15:41 IST"
+    assert rec["gmp_as_of"] == "2026-08-31"
+    assert rec["gmp_date_raw"] == "31-08-2026 Close"
+    assert rec["sub_ig_x"] == 97.92
+
+
+def test_scrape_timestamps_are_locale_stable() -> None:
+    from datetime import datetime, timezone
+
+    stamps = scrape_timestamps(datetime(2026, 8, 31, 10, 11, tzinfo=timezone.utc))
+    assert stamps["scraped_at_utc"] == "2026-08-31T10:11:00Z"
+    assert stamps["scraped_at_ist"] == "31-Aug 15:41 IST"
+
+
+def test_records_needing_alert_skips_unchanged_gmp_and_sub() -> None:
+    import pandas as pd
+
+    prior = pd.DataFrame(
+        [
+            {
+                "ipo_id": "2757",
+                "close_date": "2026-08-31",
+                "gmp_rs": "70.0",
+                "sub_total_x": "150.09",
+            }
+        ]
+    )
+    same = {"ipo_id": "2757", "close_date": "2026-08-31", "gmp_rs": 70.0, "sub_total_x": 150.09}
+    changed = {"ipo_id": "2757", "close_date": "2026-08-31", "gmp_rs": 85.0, "sub_total_x": 150.09}
+    fresh = {"ipo_id": "2013", "close_date": "2026-08-31", "gmp_rs": 54.0, "sub_total_x": 5.14}
+    errored = {"ipo_id": "2757", "close_date": "2026-08-31", "gmp_rs": 70.0, "sub_total_x": 150.09, "error": "scrape:timeout"}
+    assert records_needing_alert([same], prior) == []
+    assert records_needing_alert([changed], prior) == [changed]
+    assert records_needing_alert([fresh], prior) == [fresh]
+    assert records_needing_alert([errored], prior) == [errored]
+    assert records_needing_alert([same], None) == [same]
+
+
+def test_run_scan_skips_dispatch_when_metrics_unchanged(monkeypatch, tmp_path: Path) -> None:
+    discovery = {
+        "ipo_id": "2013",
+        "company_name": "Lumino",
+        "exchange_type": "mainboard",
+        "close_date": "2026-08-31",
+        "status": "open",
+        "url": "https://example.test/ipo/2013/",
+    }
+    rec = build_alert_record(MASTER, None, discovery)
+    rec["gmp_rs"] = 70.0
+    rec["sub_total_x"] = 150.09
+    rec["apply_s1"] = True
+    upsert_audit(tmp_path / "live_audit_log.csv", [rec])
+
+    monkeypatch.setattr(live_scanner, "_score_one", lambda *a, **k: dict(rec))
+    monkeypatch.setattr(live_scanner, "fetch_market_regime", lambda **k: "NEUTRAL")
+    dispatched: list[list] = []
+    monkeypatch.setattr(live_scanner, "dispatch", lambda records, dry_run=False: dispatched.append(list(records)))
+
+    run_scan(
+        rows=[discovery],
+        as_of=date(2026, 8, 31),
+        out_dir=tmp_path,
+        fetch_gmp=False,
+        dry_run=False,
+    )
+    assert dispatched == [[]]
+
+    rec2 = dict(rec)
+    rec2["gmp_rs"] = 85.0
+    monkeypatch.setattr(live_scanner, "_score_one", lambda *a, **k: dict(rec2))
+    dispatched.clear()
+    run_scan(
+        rows=[discovery],
+        as_of=date(2026, 8, 31),
+        out_dir=tmp_path,
+        fetch_gmp=False,
+        dry_run=False,
+    )
+    assert len(dispatched) == 1
+    assert len(dispatched[0]) == 1
+    assert float(dispatched[0][0]["gmp_rs"]) == 85.0
+
+
+def test_daily_alert_cron_is_inside_bidding_window() -> None:
+    text = Path(".github/workflows/daily_ipo_alert.yml").read_text(encoding="utf-8")
+    assert 'cron: "0 10 * * 1-5"' in text
+    assert 'cron: "30 10 * * 1-5"' in text
+    assert "50 9" not in text
+    assert "12 * * 1-5" not in text
 
 
 def test_upsert_audit_is_idempotent_on_ipo_and_close(tmp_path: Path) -> None:

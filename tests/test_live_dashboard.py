@@ -179,6 +179,31 @@ def test_parse_subscription_html_total_and_categories() -> None:
     assert out["sub_retail_x"] == 6.87
 
 
+def test_parse_subscription_html_prefers_live_table_over_daywise() -> None:
+    html = """
+    <html><body>
+    <table>
+      <tr><th>Date</th><th>Subscription (times)</th></tr>
+      <tr><td>27-Aug-2026</td><td>20.67x</td></tr>
+      <tr><td>28-Aug-2026</td><td>80.00x</td></tr>
+      <tr><td>Total</td><td>150.09x</td></tr>
+    </table>
+    <table>
+      <tr><th>Investor Category</th><th>Subscription (times)</th></tr>
+      <tr><td>Qualified Institutional</td><td>224.32x</td></tr>
+      <tr><td>Non Institutional</td><td>318.53x</td></tr>
+      <tr><td>Retail Individual</td><td>313.18x</td></tr>
+      <tr><td>Total Subscription</td><td>289.00x</td></tr>
+    </table>
+    </body></html>
+    """
+    out = parse_subscription_html(html)
+    assert out["sub_total_x"] == 289.00
+    assert out["sub_qib_x"] == 224.32
+    assert out["sub_nii_x"] == 318.53
+    assert out["sub_retail_x"] == 313.18
+
+
 def test_subscription_url() -> None:
     assert subscription_url("lumino-industries-ipo", "2013").endswith(
         "/ipo_subscription/lumino-industries-ipo/2013/"

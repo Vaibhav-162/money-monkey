@@ -1,18 +1,15 @@
-name: Daily IPO close-day alert
+name: Check IPO allotment status
 
 on:
   schedule:
-    # 3:30 PM IST (10:00 UTC) — primary scan while the bidding window is still open.
-    - cron: "0 10 * * 1-5"
-    # 4:00 PM IST (10:30 UTC) — catch-up if GitHub dropped the 3:30 tick, or GMP/Sub moved.
-    - cron: "30 10 * * 1-5"
+    - cron: "30 6 * * 1-5"
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  scan:
+  allotment:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,32 +21,28 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+        run: pip install -r requirements.txt
 
-      - name: Scan and alert
+      - name: Check allotment status
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
-        run: python scripts/live_scanner.py --out data
+        run: python scripts/check_allotment.py --out data
 
       - name: Commit audit log
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Tolerate a day with zero closing IPOs, where the audit CSV is
-          # never touched (or, on a fresh checkout, never yet created).
           if [ -f data/live_audit_log.csv ]; then
             git add data/live_audit_log.csv
           fi
           if git diff --staged --quiet; then
-            echo "no audit changes"
+            echo "no allotment changes"
             exit 0
           fi
-          git commit -m "chore: update live IPO audit log"
+          git commit -m "chore: update allotment notification flags"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push

@@ -120,13 +120,29 @@ python -m chittorgarh.live_dashboard
 python scripts/live_scanner.py --dry-run --include-open
 ```
 
-Weekday crons (UTC): `50 9 * * 1-5` = 3:20 PM IST scan;
-`15 4 * * 1-5` = 9:45 AM IST listing-day verification.
+Weekday crons run on **`main` only** (UTC):
+
+- `0 10 * * 1-5` = **3:30 PM IST** primary close-day scan (still inside the
+  bidding window; most broker UPI cutoffs are 4:00–4:30 PM IST).
+- `30 10 * * 1-5` = **4:00 PM IST** catch-up. Skips Telegram/email if
+  `gmp_rs` and `sub_total_x` are unchanged vs the audit row.
+- `15 4 * * 1-5` = 9:45 AM IST listing-day verification.
+- `30 6 * * 1-5` = 12:00 PM IST allotment-out check.
+
+You do **not** need to click Run every weekday. If Actions shows no
+**Scheduled** run of *Daily IPO close-day alert* after 3:30 PM IST, GitHub
+dropped the tick — click **Run workflow** on **`main`** immediately (a
+next-day retry is too late to bid). SMTP 535 / quoted Windows secrets are
+a separate email-login problem; they do not explain a missing schedule.
 
 Repo setup: Settings → Actions → General → Workflow permissions →
 **Read and write**. Add secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 (create a bot with @BotFather, message it once, then call `getUpdates`).
 Optional: `GMAIL_USER` and `GMAIL_APP_PASSWORD`.
+
+On Windows CMD, do **not** quote values (`set GMAIL_USER=you@gmail.com`).
+Quoted `set VAR="value"` stores the quotes, which Gmail rejects as 535.
+App passwords may be pasted with spaces; the notifier strips them.
 
 **Commit the trained models** (`data/analysis/models/*.pkl`, ~1 MB) — without
 them in the repo, GitHub Actions has no local training run to load Strategy 1

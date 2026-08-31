@@ -14,7 +14,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from analysis.live_audit import build_alert_record, to_score_row, upsert_audit
+from analysis.live_audit import (
+    build_alert_record,
+    rank_same_day_candidates,
+    read_audit,
+    records_needing_alert,
+    scrape_timestamps,
+    to_score_row,
+    upsert_audit,
+)
+from analysis.market_regime import fetch_market_regime
 from analysis.score import score_features
 from chittorgarh.browser import chromium_session
 from chittorgarh.http import HttpClient
@@ -139,10 +148,26 @@ def run_scan(
     finally:
         http.close()
 
+    regime = fetch_market_regime(cache_path=out_dir / "analysis" / "market_regime.json")
+    stamps = scrape_timestamps()
+    for rec in records:
+        rec["market_regime"] = regime
+        rec["scraped_at_utc"] = rec.get("scraped_at_utc") or stamps["scraped_at_utc"]
+        rec["scraped_at_ist"] = rec.get("scraped_at_ist") or stamps["scraped_at_ist"]
+    records = rank_same_day_candidates(records)
+    print(f"[scan] market_regime={regime} ranked={sum(1 for r in records if r.get('rank_of_day') is not None)}")
+
+    audit_path = out_dir / "live_audit_log.csv"
+    to_alert = records
     if write_audit and not dry_run:
-        upsert_audit(out_dir / "live_audit_log.csv", records)
-        print(f"[scan] wrote {out_dir / 'live_audit_log.csv'}")
-    dispatch(records, dry_run=dry_run)
+        prior = read_audit(audit_path)
+        to_alert = records_needing_alert(records, prior)
+        skipped = len(records) - len(to_alert)
+        if skipped:
+            print(f"[scan] skip {skipped} unchanged alert(s) (gmp_rs/sub_total_x match audit)")
+        upsert_audit(audit_path, records)
+        print(f"[scan] wrote {audit_path}")
+    dispatch(to_alert, dry_run=dry_run)
     return records
 
 

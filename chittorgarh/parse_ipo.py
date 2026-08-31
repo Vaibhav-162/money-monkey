@@ -206,6 +206,27 @@ def _parse_about(soup: BeautifulSoup) -> tuple[Optional[str], Optional[str]]:
     return about, ("; ".join(strengths)[:2000] if strengths else None)
 
 
+def parse_allotment_published(soup: BeautifulSoup) -> bool:
+    """True if Chittorgarh has a Basis of Allotment / allotment-out signal.
+
+    Used by the live allotment notifier. The expected timetable date is a
+    fallback only; this looks for a published document/link on the page.
+    """
+    blob = soup.get_text(" ", strip=True).lower()
+    if "basis of allotment" in blob:
+        return True
+    if re.search(r"\ballotment\s+(out|finali[sz]ed|published)\b", blob):
+        return True
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").lower()
+        text = clean_text(a.get_text(" ")).lower()
+        if "basis-of-allotment" in href or "basis of allotment" in text:
+            return True
+        if "allotment" in href and ("pdf" in href or "basis" in href):
+            return True
+    return False
+
+
 def _parse_registrar(soup: BeautifulSoup) -> Optional[str]:
     for tag in soup.find_all(["h2", "h3", "h4"]):
         if "registrar" in _heading_text(tag).lower():
@@ -785,6 +806,7 @@ def parse_ipo_html(
         "total_applications": apps,
         **reviews,
         "registrar": _parse_registrar(soup),
+        "allotment_published": parse_allotment_published(soup),
         "lead_managers": _parse_lead_managers(soup),
         "listing_day_close": tracker.get("listing_day_close"),
         "listing_day_gain_pct": tracker.get("listing_day_gain_pct"),

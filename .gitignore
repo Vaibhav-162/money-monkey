@@ -12,3 +12,4 @@ data/analysis/*
 *.egg-info/
 .pytest_cache/
 .playwright-browsers/
+.env

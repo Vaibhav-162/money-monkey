@@ -6,11 +6,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 AUDIT_COLUMNS = [
     "timestamp_utc",
+    "scraped_at_utc",
+    "scraped_at_ist",
     "ipo_id",
     "company_name",
     "board",
@@ -21,7 +24,16 @@ AUDIT_COLUMNS = [
     "lot_size",
     "gmp_rs",
     "gmp_pct",
+    "gmp_as_of",
+    "gmp_date_raw",
     "sub_total_x",
+    "sub_ig_x",
+    "sub_qib_x",
+    "registrar",
+    "capital_required",
+    "ev_capital_ratio",
+    "rank_of_day",
+    "rank_total_of_day",
     "p_pop",
     "p_allot",
     "ev_retail",
@@ -31,13 +43,36 @@ AUDIT_COLUMNS = [
     "quality_breakdown_json",
     "s2_model_exret_pred",
     "listing_date_expected",
+    "allotment_date",
+    "market_regime",
     "error",
     "verified",
     "actual_listing_open",
     "actual_open_return_pct",
     "actual_is_clean_pop",
     "verified_at",
+    "allotment_notified",
+    "allotment_notified_at",
 ]
+
+_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def scrape_timestamps(now: datetime | None = None) -> dict[str, str]:
+    """UTC ISO + locale-stable IST display stamp for cards and the audit log."""
+    utc = now if now is not None else datetime.now(timezone.utc)
+    if utc.tzinfo is None:
+        utc = utc.replace(tzinfo=timezone.utc)
+    else:
+        utc = utc.astimezone(timezone.utc)
+    ist = utc.astimezone(ZoneInfo("Asia/Kolkata"))
+    return {
+        "scraped_at_utc": utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "scraped_at_ist": f"{ist.day:02d}-{_MONTHS[ist.month - 1]} {ist.strftime('%H:%M')} IST",
+    }
 
 
 def _iso(value: Any) -> Any:
@@ -71,6 +106,8 @@ def build_alert_record(
     rec.update(
         {
             "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "scraped_at_utc": master.get("scraped_at_utc"),
+            "scraped_at_ist": master.get("scraped_at_ist"),
             "ipo_id": str(discovery.get("ipo_id") or master.get("ipo_id") or ""),
             "company_name": discovery.get("company_name") or master.get("company_name"),
             "board": discovery.get("exchange_type") or master.get("exchange_type"),
@@ -81,10 +118,17 @@ def build_alert_record(
             "lot_size": master.get("lot_size"),
             "gmp_rs": master.get("gmp_rs"),
             "gmp_pct": master.get("gmp_pct"),
+            "gmp_as_of": master.get("gmp_as_of") or master.get("gmp_close_date"),
+            "gmp_date_raw": master.get("gmp_date_raw"),
             "sub_total_x": master.get("sub_total_x"),
+            "sub_ig_x": master.get("sub_ig_x"),
+            "sub_qib_x": master.get("sub_qib_x"),
+            "registrar": master.get("registrar"),
             "listing_date_expected": _iso(master.get("listing_date")),
+            "allotment_date": _iso(master.get("allotment_date")),
             "error": error,
             "verified": False,
+            "allotment_notified": False,
         }
     )
     if score:
@@ -141,6 +185,9 @@ def upsert_audit(path: Path, records: list[dict[str, Any]]) -> pd.DataFrame:
                 incoming.at[key, "actual_open_return_pct"] = old["actual_open_return_pct"]
                 incoming.at[key, "actual_is_clean_pop"] = old["actual_is_clean_pop"]
                 incoming.at[key, "verified_at"] = old["verified_at"]
+            if str(old.get("allotment_notified", "")).lower() in {"true", "1", "yes"}:
+                incoming.at[key, "allotment_notified"] = old["allotment_notified"]
+                incoming.at[key, "allotment_notified_at"] = old["allotment_notified_at"]
     kept = current[~current["_key"].isin(set(incoming["_key"]))].drop(columns=["_key"])
     fresh = incoming.drop(columns=["_key"])
     parts = [p for p in (kept, fresh) if not p.empty]
@@ -225,3 +272,125 @@ def performance_summary(frame: pd.DataFrame) -> dict[str, Any]:
         "s2_pass_mean_open_return_pct": None if s2_ret.dropna().empty else float(s2_ret.mean()),
         "note": "Live forward-test, not investment advice. S2 listing-day return is not the 6-month target.",
     }
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    return bool(value)
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num != num:
+        return None
+    return num
+
+
+def capital_required(record: dict[str, Any]) -> float | None:
+    price = _safe_float(record.get("price_band_high"))
+    if price is None:
+        price = _safe_float(record.get("issue_price"))
+    lot = _safe_float(record.get("lot_size"))
+    if price is None or lot is None or price <= 0 or lot <= 0:
+        return None
+    return price * lot
+
+
+def ev_capital_ratio(record: dict[str, Any], capital: float | None = None) -> float | None:
+    cap = capital if capital is not None else capital_required(record)
+    ev = _safe_float(record.get("ev_retail"))
+    if cap is None or cap <= 0 or ev is None:
+        return None
+    return ev / cap
+
+
+def _metric_equal(left: Any, right: Any) -> bool:
+    a = _safe_float(left)
+    b = _safe_float(right)
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    return abs(a - b) < 1e-6
+
+
+def metrics_unchanged(new: dict[str, Any], old: Any) -> bool:
+    """True when gmp_rs and sub_total_x match a prior audit row (catch-up de-dupe)."""
+    if old is None:
+        return False
+    return _metric_equal(new.get("gmp_rs"), old.get("gmp_rs")) and _metric_equal(
+        new.get("sub_total_x"), old.get("sub_total_x")
+    )
+
+
+def records_needing_alert(
+    records: list[dict[str, Any]],
+    existing: pd.DataFrame | None,
+) -> list[dict[str, Any]]:
+    """Keep new/changed (or errored) rows; drop catch-up clones of the same GMP/Sub."""
+    if existing is None or existing.empty:
+        return list(records)
+    keyed = existing.copy()
+    keyed["_key"] = keyed["ipo_id"].astype(str) + "|" + keyed["close_date"].astype(str)
+    keyed = keyed.drop_duplicates(subset="_key", keep="last").set_index("_key")
+    out: list[dict[str, Any]] = []
+    for rec in records:
+        if rec.get("error"):
+            out.append(rec)
+            continue
+        key = f"{rec.get('ipo_id') or ''}|{rec.get('close_date') or ''}"
+        if key not in keyed.index:
+            out.append(rec)
+            continue
+        if not metrics_unchanged(rec, keyed.loc[key]):
+            out.append(rec)
+    return out
+
+
+def rank_same_day_candidates(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rank APPLY-S1 names that share a close_date by EV/capital, then QIB.
+
+    A lone same-day applicant is left unranked (no banner). Missing ratio or
+    QIB sorts as worst, not as zero. Does not change apply_s1 / apply_s2.
+    """
+    out = [dict(rec) for rec in records]
+    for rec in out:
+        cap = capital_required(rec)
+        rec["capital_required"] = cap
+        rec["ev_capital_ratio"] = ev_capital_ratio(rec, cap)
+        rec["rank_of_day"] = None
+        rec["rank_total_of_day"] = None
+
+    groups: dict[str, list[int]] = {}
+    for i, rec in enumerate(out):
+        if rec.get("error"):
+            continue
+        if not _as_bool(rec.get("apply_s1")):
+            continue
+        day = str(rec.get("close_date") or "")
+        groups.setdefault(day, []).append(i)
+
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+
+        def sort_key(i: int) -> tuple[float, float]:
+            ratio = out[i].get("ev_capital_ratio")
+            qib = _safe_float(out[i].get("sub_qib_x"))
+            return (
+                ratio if ratio is not None else float("-inf"),
+                qib if qib is not None else float("-inf"),
+            )
+
+        ranked = sorted(idxs, key=sort_key, reverse=True)
+        total = len(ranked)
+        for pos, i in enumerate(ranked, 1):
+            out[i]["rank_of_day"] = pos
+            out[i]["rank_total_of_day"] = total
+    return out
