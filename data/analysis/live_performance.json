@@ -1,5 +1,11 @@
 {
-  "n_alerts": 0,
+  "n_alerts": 2,
   "n_verified": 0,
-  "note": "Live forward-test, not investment advice. Empty until the first close-day scan + listing verification."
+  "n_apply_s1_verified": 0,
+  "realized_precision_apply_s1": null,
+  "mean_ev_predicted_apply_s1": null,
+  "mean_realized_ev_proxy_apply_s1": null,
+  "n_s2_pass_verified": 0,
+  "s2_pass_mean_open_return_pct": null,
+  "note": "Live forward-test, not investment advice. S2 listing-day return is not the 6-month target."
 }
