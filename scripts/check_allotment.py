@@ -1,9 +1,14 @@
-"""Notify when Chittorgarh shows allotment is out. No PAN scraping."""
+"""Notify when Chittorgarh shows allotment is out.
+
+With PAN_PROFILES set, try an automated registrar lookup per person and email
+that person only. Full PANs never go to git, logs, Telegram, or the audit CSV.
+"""
 
 from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import nullcontext
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -14,11 +19,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from analysis.live_audit import read_audit, write_audit
+from analysis.live_audit import AUDIT_COLUMNS, read_audit, write_audit
+from chittorgarh.browser import chromium_session
 from chittorgarh.http import HttpClient
 from chittorgarh.live_dashboard import today_ist
 from chittorgarh.parse_ipo import parse_ipo_html
-from scripts.notify import format_allotment_card, format_email_digest, send_email, send_telegram
+from chittorgarh.registrar_allotment import checker_for_registrar, load_pan_profiles, mask_pan
+from scripts.notify import (
+    format_allotment_card,
+    format_allotment_result_email,
+    format_allotment_telegram_summary,
+    format_email_digest,
+    send_email,
+    send_telegram,
+)
+
+EMAIL_STATUSES = {"allotted", "not_allotted"}
 
 
 def _flag(value: Any) -> bool:
@@ -95,6 +111,72 @@ def dispatch_allotment(record: dict[str, Any], *, dry_run: bool = False) -> None
         print(f"[allotment] Email error for {company}: {exc}")
 
 
+def _lookup_status(checker, page, company: str, pan: str) -> dict[str, Any]:
+    try:
+        return checker(page, company, pan)
+    except Exception as exc:
+        print(f"[allotment] checker error for {mask_pan(pan)}: {exc}")
+        return {"status": "captcha_failed", "shares": None}
+
+
+def dispatch_pan_results(
+    record: dict[str, Any],
+    profiles: list[dict[str, str]],
+    *,
+    page: Any = None,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Email allotted/not-allotted only; Telegram counts if anyone was emailed."""
+    company = str(record.get("company_name") or record.get("ipo_id") or "IPO")
+    registrar = record.get("registrar") or ""
+    checker = checker_for_registrar(registrar)
+    n_emailed = 0
+    n_skipped = 0
+    for profile in profiles:
+        result: dict[str, Any] | None = None
+        if checker is not None and page is not None:
+            result = _lookup_status(checker, page, company, profile["pan"])
+        status = (result or {}).get("status")
+        if status not in EMAIL_STATUSES:
+            n_skipped += 1
+            continue
+        n_emailed += 1
+        body = format_allotment_result_email(
+            label=profile.get("label") or "investor",
+            company=company,
+            registrar=registrar,
+            status=status,
+            shares=(result or {}).get("shares"),
+        )
+        subject = f"Allotment {status.replace('_', ' ')}: {company}"
+        if dry_run:
+            print(f"--- allotment email ({profile.get('label')}) ---")
+            print(body)
+            print("--------------------")
+            continue
+        try:
+            send_email(subject, format_email_digest([body]), to_addr=profile["email"])
+        except Exception as exc:
+            print(f"[allotment] Email error for {profile.get('label')}: {exc}")
+
+    if n_emailed > 0:
+        summary = format_allotment_telegram_summary(
+            record, n_profiles=len(profiles), n_emailed=n_emailed, n_skipped=n_skipped
+        )
+        if dry_run:
+            print("--- allotment telegram summary ---")
+            print(summary)
+            print("--------------------")
+        else:
+            try:
+                send_telegram(summary)
+            except Exception as exc:
+                print(f"[allotment] Telegram error for {company}: {exc}")
+    elif dry_run:
+        print("--- allotment telegram skipped (no emails sent) ---")
+    return {"n_emailed": n_emailed, "n_skipped": n_skipped, "n_profiles": len(profiles)}
+
+
 def run_check(
     *,
     out_dir: Path | None = None,
@@ -103,6 +185,8 @@ def run_check(
     client: Optional[HttpClient] = None,
     as_of: Optional[date] = None,
     dry_run: bool = False,
+    profiles: Optional[list[dict[str, str]]] = None,
+    page: Any = None,
 ) -> list[dict[str, Any]]:
     out_dir = Path(out_dir) if out_dir else ROOT / "data"
     path = Path(audit_path) if audit_path else out_dir / "live_audit_log.csv"
@@ -112,32 +196,54 @@ def run_check(
         print("[allotment] audit log empty")
         return []
 
+    loaded = profiles if profiles is not None else load_pan_profiles()
     own = client is None
     http = client or HttpClient(cache_dir=out_dir / "cache_live", delay=1.5)
     updated_rows: list[dict[str, Any]] = []
     newly: list[dict[str, Any]] = []
+    own_page = page is None and bool(loaded)
+    session_cm = chromium_session() if own_page else nullcontext(None)
     try:
-        for rec in frame.to_dict(orient="records"):
-            if not is_allotment_due(rec, day):
-                updated_rows.append(rec)
-                continue
+        with session_cm as context:
+            lookup_page = page
+            opened = None
+            if lookup_page is None and context is not None:
+                opened = context.new_page()
+                lookup_page = opened
             try:
-                inspected = inspect_row(http, rec, day)
-            except Exception as exc:
-                rec = dict(rec)
-                rec["error"] = f"allotment:{exc}"
-                updated_rows.append(rec)
-                continue
-            if inspected.pop("_just_notified", False):
-                newly.append(inspected)
-                dispatch_allotment(inspected, dry_run=dry_run)
-            updated_rows.append(inspected)
+                for rec in frame.to_dict(orient="records"):
+                    if not is_allotment_due(rec, day):
+                        updated_rows.append(rec)
+                        continue
+                    try:
+                        inspected = inspect_row(http, rec, day)
+                    except Exception as exc:
+                        rec = dict(rec)
+                        rec["error"] = f"allotment:{exc}"
+                        updated_rows.append(rec)
+                        continue
+                    if inspected.pop("_just_notified", False):
+                        newly.append(inspected)
+                        if loaded:
+                            dispatch_pan_results(
+                                inspected, loaded, page=lookup_page, dry_run=dry_run
+                            )
+                        else:
+                            dispatch_allotment(inspected, dry_run=dry_run)
+                    updated_rows.append(inspected)
+            finally:
+                if opened is not None:
+                    try:
+                        opened.close()
+                    except Exception:
+                        pass
     finally:
         if own:
             http.close()
 
     if not dry_run:
-        write_audit(path, pd.DataFrame(updated_rows))
+        persist = [{k: v for k, v in rec.items() if k in AUDIT_COLUMNS} for rec in updated_rows]
+        write_audit(path, pd.DataFrame(persist))
     print(f"[allotment] newly_out={len(newly)} of {len(frame)}")
     return newly
 

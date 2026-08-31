@@ -7,8 +7,11 @@ import json
 import os
 import re
 import smtplib
+from datetime import datetime
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -287,11 +290,71 @@ def format_allotment_card(record: dict[str, Any]) -> str:
     company = record.get("company_name") or record.get("ipo_id") or "Unknown IPO"
     registrar = record.get("registrar") or "unknown registrar"
     portal = registrar_portal_url(registrar)
+    label = str(record.get("label") or "").strip()
+    greeting = f"Hi {_esc(label)},\n" if label else ""
     return (
+        f"{greeting}"
         f"📢 <b>ALLOTMENT OUT: {_esc(company)}</b>\n"
         f"Registrar: {_esc(registrar)}.\n"
         "Check your PAN status at their portal "
         f'(do not send PAN to this bot): <a href="{_esc(portal)}">{_esc(portal)}</a>'
+    )
+
+
+def format_allotment_result_email(
+    *,
+    label: str,
+    company: str,
+    registrar: str,
+    status: str,
+    shares: Any = None,
+) -> str:
+    """Personalized Allotted / Not allotted / No application card. Never includes PAN."""
+    who = str(label or "investor").strip() or "investor"
+    name = company or "Unknown IPO"
+    house = registrar or "the registrar"
+    portal = registrar_portal_url(house)
+    key = str(status or "").strip().lower()
+    if key == "allotted":
+        headline = "ALLOTTED"
+        if shares not in (None, ""):
+            detail = f"Shares allotted: {_esc(shares)}."
+        else:
+            detail = "Shares allotted: the registrar confirmed an allotment (share count not parsed)."
+    elif key == "not_allotted":
+        headline = "NOT ALLOTTED"
+        detail = "The registrar shows no shares allotted for this application."
+    elif key == "no_application":
+        headline = "NO APPLICATION FOUND"
+        detail = "The registrar did not find an application under this profile."
+    else:
+        headline = "CHECK MANUALLY"
+        detail = "Automated lookup could not confirm a result."
+    return (
+        f"Hi {_esc(who)},\n"
+        f"📢 <b>{_esc(headline)}: {_esc(name)}</b>\n"
+        f"Registrar: {_esc(house)}.\n"
+        f"{detail}\n"
+        "Confirm on the registrar portal before acting: "
+        f'<a href="{_esc(portal)}">{_esc(portal)}</a>'
+    )
+
+
+def format_allotment_telegram_summary(
+    record: dict[str, Any],
+    *,
+    n_profiles: int,
+    n_emailed: int,
+    n_skipped: int,
+) -> str:
+    """Shared Telegram line: counts only, never PAN or per-person results."""
+    company = record.get("company_name") or record.get("ipo_id") or "Unknown IPO"
+    registrar = record.get("registrar") or "unknown registrar"
+    return (
+        f"📢 <b>ALLOTMENT OUT: {_esc(company)}</b>\n"
+        f"Registrar: {_esc(registrar)}.\n"
+        f"Checked {_esc(n_profiles)} PAN(s): {_esc(n_emailed)} emailed, "
+        f"{_esc(n_skipped)} skipped."
     )
 
 
@@ -446,7 +509,18 @@ def send_email(
     return True
 
 
-def send_failure_alert(error: str) -> None:
+def send_failure_alert(error: str, state_path: Optional[Path] = None) -> None:
+    path = state_path if state_path is not None else Path("data") / "live_alert_state.json"
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict) and payload.get("failure_alerted_ist") == today:
+            print("[notify] failure alert already sent today; skipping Telegram/email")
+            return
+
     snippet = error[:1500]
     html_body = f"⚠️ <b>IPO live scanner FAILED</b>\n<code>{_esc(snippet)}</code>"
     try:
@@ -457,6 +531,12 @@ def send_failure_alert(error: str) -> None:
         send_email("IPO live scanner FAILED", format_email_digest([html_body]))
     except Exception as exc:
         print(f"[notify] failure email also failed: {_redact(str(exc))}")
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"failure_alerted_ist": today}), encoding="utf-8")
+    except Exception as exc:
+        print(f"[notify] could not write failure-alert state: {_redact(str(exc))}")
 
 
 def _safe_print(text: str) -> None:

@@ -21,7 +21,11 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
 
       - name: Check allotment status
         env:
@@ -30,6 +34,7 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
+          PAN_PROFILES: ${{ secrets.PAN_PROFILES }}
         run: python scripts/check_allotment.py --out data
 
       - name: Commit audit log

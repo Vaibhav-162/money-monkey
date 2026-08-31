@@ -4,7 +4,7 @@ on:
   schedule:
     # 3:30 PM IST (10:00 UTC) — primary scan while the bidding window is still open.
     - cron: "0 10 * * 1-5"
-    # 4:00 PM IST (10:30 UTC) — catch-up if GitHub dropped the 3:30 tick, or GMP/Sub moved.
+    # 4:00 PM IST (10:30 UTC) — catch-up if GitHub dropped the 3:30 tick (presence-only).
     - cron: "30 10 * * 1-5"
   workflow_dispatch:
 
@@ -38,6 +38,7 @@ jobs:
         run: python scripts/live_scanner.py --out data
 
       - name: Commit audit log
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -45,6 +46,9 @@ jobs:
           # never touched (or, on a fresh checkout, never yet created).
           if [ -f data/live_audit_log.csv ]; then
             git add data/live_audit_log.csv
+          fi
+          if [ -f data/live_alert_state.json ]; then
+            git add data/live_alert_state.json
           fi
           if git diff --staged --quiet; then
             echo "no audit changes"

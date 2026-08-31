@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from analysis.live_audit import (
     build_alert_record,
     compute_actuals,
@@ -101,7 +102,7 @@ def test_scrape_timestamps_are_locale_stable() -> None:
     assert stamps["scraped_at_ist"] == "31-Aug 15:41 IST"
 
 
-def test_records_needing_alert_skips_unchanged_gmp_and_sub() -> None:
+def test_records_needing_alert_only_alerts_when_row_missing() -> None:
     import pandas as pd
 
     prior = pd.DataFrame(
@@ -118,14 +119,22 @@ def test_records_needing_alert_skips_unchanged_gmp_and_sub() -> None:
     changed = {"ipo_id": "2757", "close_date": "2026-08-31", "gmp_rs": 85.0, "sub_total_x": 150.09}
     fresh = {"ipo_id": "2013", "close_date": "2026-08-31", "gmp_rs": 54.0, "sub_total_x": 5.14}
     errored = {"ipo_id": "2757", "close_date": "2026-08-31", "gmp_rs": 70.0, "sub_total_x": 150.09, "error": "scrape:timeout"}
+    errored_fresh = {
+        "ipo_id": "9999",
+        "close_date": "2026-08-31",
+        "gmp_rs": 1.0,
+        "sub_total_x": 1.0,
+        "error": "scrape:timeout",
+    }
     assert records_needing_alert([same], prior) == []
-    assert records_needing_alert([changed], prior) == [changed]
+    assert records_needing_alert([changed], prior) == []
     assert records_needing_alert([fresh], prior) == [fresh]
-    assert records_needing_alert([errored], prior) == [errored]
+    assert records_needing_alert([errored], prior) == []
+    assert records_needing_alert([errored_fresh], prior) == [errored_fresh]
     assert records_needing_alert([same], None) == [same]
 
 
-def test_run_scan_skips_dispatch_when_metrics_unchanged(monkeypatch, tmp_path: Path) -> None:
+def test_run_scan_skips_dispatch_when_row_already_exists(monkeypatch, tmp_path: Path) -> None:
     discovery = {
         "ipo_id": "2013",
         "company_name": "Lumino",
@@ -165,9 +174,24 @@ def test_run_scan_skips_dispatch_when_metrics_unchanged(monkeypatch, tmp_path: P
         fetch_gmp=False,
         dry_run=False,
     )
+    assert dispatched == [[]]
+
+    discovery3 = {**discovery, "ipo_id": "9999"}
+    rec3 = dict(rec)
+    rec3["ipo_id"] = "9999"
+    rec3["gmp_rs"] = 10.0
+    monkeypatch.setattr(live_scanner, "_score_one", lambda *a, **k: dict(rec3))
+    dispatched.clear()
+    run_scan(
+        rows=[discovery3],
+        as_of=date(2026, 8, 31),
+        out_dir=tmp_path,
+        fetch_gmp=False,
+        dry_run=False,
+    )
     assert len(dispatched) == 1
     assert len(dispatched[0]) == 1
-    assert float(dispatched[0][0]["gmp_rs"]) == 85.0
+    assert dispatched[0][0]["ipo_id"] == "9999"
 
 
 def test_daily_alert_cron_is_inside_bidding_window() -> None:
@@ -276,7 +300,7 @@ def test_upsert_audit_tolerates_duplicate_keys_in_existing_file(tmp_path: Path) 
 
 def test_run_scan_sends_failure_alert_on_empty_discovery(monkeypatch, tmp_path: Path) -> None:
     calls = []
-    monkeypatch.setattr(live_scanner, "send_failure_alert", lambda msg: calls.append(msg))
+    monkeypatch.setattr(live_scanner, "send_failure_alert", lambda msg, **kw: calls.append(msg))
     out = run_scan(rows=[], out_dir=tmp_path, dry_run=False)
     assert out == []
     assert len(calls) == 1
@@ -285,8 +309,19 @@ def test_run_scan_sends_failure_alert_on_empty_discovery(monkeypatch, tmp_path: 
 
 def test_run_scan_no_failure_alert_when_simply_no_closers_today(monkeypatch, tmp_path: Path) -> None:
     calls = []
-    monkeypatch.setattr(live_scanner, "send_failure_alert", lambda msg: calls.append(msg))
+    monkeypatch.setattr(live_scanner, "send_failure_alert", lambda msg, **kw: calls.append(msg))
     rows = [{"ipo_id": "1", "status": "upcoming", "close_date": "2026-09-05"}]
     out = run_scan(rows=rows, as_of=date(2026, 8, 31), out_dir=tmp_path, dry_run=False)
     assert out == []
     assert calls == []
+
+
+def test_run_scan_propagates_discovery_exception_instead_of_swallowing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    def boom(*args, **kwargs):
+        raise RuntimeError("dashboard exploded")
+
+    monkeypatch.setattr(live_scanner, "scrape_all_open_ipos", boom)
+    with pytest.raises(RuntimeError, match="dashboard exploded"):
+        run_scan(out_dir=tmp_path, fetch_gmp=False)

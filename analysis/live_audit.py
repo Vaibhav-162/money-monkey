@@ -310,30 +310,11 @@ def ev_capital_ratio(record: dict[str, Any], capital: float | None = None) -> fl
     return ev / cap
 
 
-def _metric_equal(left: Any, right: Any) -> bool:
-    a = _safe_float(left)
-    b = _safe_float(right)
-    if a is None and b is None:
-        return True
-    if a is None or b is None:
-        return False
-    return abs(a - b) < 1e-6
-
-
-def metrics_unchanged(new: dict[str, Any], old: Any) -> bool:
-    """True when gmp_rs and sub_total_x match a prior audit row (catch-up de-dupe)."""
-    if old is None:
-        return False
-    return _metric_equal(new.get("gmp_rs"), old.get("gmp_rs")) and _metric_equal(
-        new.get("sub_total_x"), old.get("sub_total_x")
-    )
-
-
 def records_needing_alert(
     records: list[dict[str, Any]],
     existing: pd.DataFrame | None,
 ) -> list[dict[str, Any]]:
-    """Keep new/changed (or errored) rows; drop catch-up clones of the same GMP/Sub."""
+    """Keep only records for which the 3:30 run has no prior audit row — this is the 4:00 catch-up gate; it does not compare field values."""
     if existing is None or existing.empty:
         return list(records)
     keyed = existing.copy()
@@ -341,14 +322,8 @@ def records_needing_alert(
     keyed = keyed.drop_duplicates(subset="_key", keep="last").set_index("_key")
     out: list[dict[str, Any]] = []
     for rec in records:
-        if rec.get("error"):
-            out.append(rec)
-            continue
         key = f"{rec.get('ipo_id') or ''}|{rec.get('close_date') or ''}"
         if key not in keyed.index:
-            out.append(rec)
-            continue
-        if not metrics_unchanged(rec, keyed.loc[key]):
             out.append(rec)
     return out
 

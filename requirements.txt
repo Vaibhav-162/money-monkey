@@ -10,5 +10,7 @@ lightgbm>=4.3.0
 shap>=0.45.0
 yfinance>=0.2.40
 pyarrow>=15.0.0
+pytesseract>=0.3.10
+Pillow>=10.0.0
 
 

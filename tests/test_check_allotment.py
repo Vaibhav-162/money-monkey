@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from analysis.live_audit import AUDIT_COLUMNS, write_audit
+from analysis.live_audit import AUDIT_COLUMNS, read_audit, write_audit
 from chittorgarh.parse_ipo import parse_allotment_published
 from scripts.check_allotment import is_allotment_due, run_check
 
@@ -79,6 +79,7 @@ def test_run_check_notifies_once(tmp_path: Path, monkeypatch) -> None:
         audit_path=path,
         client=client,
         as_of=date(2026, 8, 30),
+        profiles=[],
     )
     assert [r["company_name"] for r in first] == ["Test Co"]
     assert sent == ["Test Co"]
@@ -90,6 +91,7 @@ def test_run_check_notifies_once(tmp_path: Path, monkeypatch) -> None:
         audit_path=path,
         client=client2,
         as_of=date(2026, 8, 30),
+        profiles=[],
     )
     assert second == []
     assert client2.calls == 0
@@ -106,6 +108,248 @@ def test_run_check_pending_page_does_not_notify(tmp_path: Path, monkeypatch) -> 
         audit_path=path,
         client=FakeClient(PENDING_HTML),
         as_of=date(2026, 8, 30),
+        profiles=[],
     )
     assert newly == []
     assert sent == []
+
+
+def test_run_check_hybrid_emails_and_masked_telegram(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "live_audit_log.csv"
+    write_audit(
+        path,
+        pd.DataFrame([_row(registrar="KFin Technologies Limited", company_name="Test Co")]),
+    )
+    emails: list[tuple[str, str, str]] = []
+    telegrams: list[str] = []
+
+    def fake_email(subject, body, to_addr=None, **kw):
+        emails.append((subject, body, to_addr or ""))
+        return True
+
+    monkeypatch.setattr("scripts.check_allotment.send_email", fake_email)
+    monkeypatch.setattr("scripts.check_allotment.send_telegram", lambda text, **kw: telegrams.append(text) or True)
+
+    def fake_checker(page, company, pan):
+        if pan == "ABCDE1234F":
+            return {"status": "allotted", "shares": 100}
+        return {"status": "captcha_failed", "shares": None}
+
+    monkeypatch.setattr("scripts.check_allotment.checker_for_registrar", lambda name: fake_checker)
+    profiles = [
+        {"label": "Dad", "pan": "ABCDE1234F", "email": "dad@example.com"},
+        {"label": "Me", "pan": "PQRST5678G", "email": "me@example.com"},
+    ]
+    newly = run_check(
+        out_dir=tmp_path,
+        audit_path=path,
+        client=FakeClient(PUBLISHED_HTML),
+        as_of=date(2026, 8, 30),
+        profiles=profiles,
+        page=object(),
+    )
+    assert [r["company_name"] for r in newly] == ["Test Co"]
+    assert len(emails) == 1
+    assert emails[0][2] == "dad@example.com"
+    dad = emails[0]
+    assert "ALLOTTED" in dad[1]
+    assert "100" in dad[1]
+    assert len(telegrams) == 1
+    summary = telegrams[0]
+    assert "1 emailed" in summary
+    assert "1 skipped" in summary
+    assert "ABCDE1234F" not in summary
+    assert "PQRST5678G" not in summary
+    assert "dad@example.com" not in summary
+    assert "Dad" not in summary
+    assert "ALLOTTED" not in summary
+    assert ">100<" not in summary and "Shares allotted: 100" not in summary
+    saved = (tmp_path / "live_audit_log.csv").read_text(encoding="utf-8")
+    assert "ABCDE1234F" not in saved
+    assert "PQRST5678G" not in saved
+    assert "dad@example.com" not in saved
+    from analysis.live_audit import AUDIT_COLUMNS, read_audit
+
+    cols = list(read_audit(path).columns)
+    assert cols == AUDIT_COLUMNS
+
+
+def test_run_check_unsupported_registrar_is_silent(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "live_audit_log.csv"
+    write_audit(
+        path,
+        pd.DataFrame([_row(registrar="Bigshare Services Pvt.Ltd.", company_name="Test Co")]),
+    )
+    emails: list[tuple[str, str, str]] = []
+    telegrams: list[str] = []
+    calls = []
+
+    def boom_checker(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError("unsupported registrar must not call a checker")
+
+    def capture_email(subject, body, to_addr=None, **kw):
+        emails.append((subject, body, to_addr or ""))
+        return True
+
+    monkeypatch.setattr("scripts.check_allotment.checker_for_registrar", lambda name: None)
+    monkeypatch.setattr("scripts.check_allotment.send_email", capture_email)
+    monkeypatch.setattr("scripts.check_allotment.send_telegram", lambda text, **kw: telegrams.append(text) or True)
+    monkeypatch.setattr("chittorgarh.registrar_allotment.check_kfintech", boom_checker)
+
+    run_check(
+        out_dir=tmp_path,
+        audit_path=path,
+        client=FakeClient(PUBLISHED_HTML),
+        as_of=date(2026, 8, 30),
+        profiles=[{"label": "Me", "pan": "ABCDE1234F", "email": "me@example.com"}],
+        page=object(),
+    )
+    assert emails == []
+    assert telegrams == []
+    assert calls == []
+    saved = (tmp_path / "live_audit_log.csv").read_text(encoding="utf-8")
+    assert "ABCDE1234F" not in saved
+
+
+def test_run_check_reads_pan_profiles_from_env(tmp_path: Path, monkeypatch) -> None:
+    import json
+
+    path = tmp_path / "live_audit_log.csv"
+    write_audit(
+        path,
+        pd.DataFrame([_row(registrar="KFin Technologies Limited", company_name="Test Co")]),
+    )
+    monkeypatch.setenv(
+        "PAN_PROFILES",
+        json.dumps([{"label": "Me", "pan": "ABCDE1234F", "email": "me@example.com"}]),
+    )
+    emails: list[str] = []
+    telegrams: list[str] = []
+    monkeypatch.setattr(
+        "scripts.check_allotment.send_email",
+        lambda subject, body, to_addr=None, **kw: emails.append(to_addr or "") or True,
+    )
+    monkeypatch.setattr(
+        "scripts.check_allotment.send_telegram",
+        lambda text, **kw: telegrams.append(text) or True,
+    )
+    monkeypatch.setattr(
+        "scripts.check_allotment.checker_for_registrar",
+        lambda name: (lambda page, company, pan: {"status": "company_not_found", "shares": None}),
+    )
+    run_check(
+        out_dir=tmp_path,
+        audit_path=path,
+        client=FakeClient(PUBLISHED_HTML),
+        as_of=date(2026, 8, 30),
+        page=object(),
+    )
+    assert emails == []
+    assert telegrams == []
+
+
+def test_run_check_lookup_failed_is_silent(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "live_audit_log.csv"
+    write_audit(
+        path,
+        pd.DataFrame([_row(registrar="KFin Technologies Limited", company_name="Test Co")]),
+    )
+    emails: list[tuple[str, str, str]] = []
+    telegrams: list[str] = []
+    monkeypatch.setattr(
+        "scripts.check_allotment.send_email",
+        lambda subject, body, to_addr=None, **kw: emails.append((subject, body, to_addr or "")) or True,
+    )
+    monkeypatch.setattr("scripts.check_allotment.send_telegram", lambda text, **kw: telegrams.append(text) or True)
+    monkeypatch.setattr(
+        "scripts.check_allotment.checker_for_registrar",
+        lambda name: (lambda page, company, pan: {"status": "lookup_failed", "shares": None}),
+    )
+    run_check(
+        out_dir=tmp_path,
+        audit_path=path,
+        client=FakeClient(PUBLISHED_HTML),
+        as_of=date(2026, 8, 30),
+        profiles=[{"label": "Me", "pan": "ABCDE1234F", "email": "me@example.com"}],
+        page=object(),
+    )
+    assert emails == []
+    assert telegrams == []
+
+
+def test_run_check_no_application_is_silent_but_marks_notified(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "live_audit_log.csv"
+    write_audit(
+        path,
+        pd.DataFrame([_row(registrar="KFin Technologies Limited", company_name="Test Co")]),
+    )
+    emails: list[tuple[str, str, str]] = []
+    telegrams: list[str] = []
+    monkeypatch.setattr(
+        "scripts.check_allotment.send_email",
+        lambda subject, body, to_addr=None, **kw: emails.append((subject, body, to_addr or "")) or True,
+    )
+    monkeypatch.setattr("scripts.check_allotment.send_telegram", lambda text, **kw: telegrams.append(text) or True)
+    monkeypatch.setattr(
+        "scripts.check_allotment.checker_for_registrar",
+        lambda name: (lambda page, company, pan: {"status": "no_application", "shares": None}),
+    )
+    newly = run_check(
+        out_dir=tmp_path,
+        audit_path=path,
+        client=FakeClient(PUBLISHED_HTML),
+        as_of=date(2026, 8, 30),
+        profiles=[{"label": "Me", "pan": "ABCDE1234F", "email": "me@example.com"}],
+        page=object(),
+    )
+    assert [r["company_name"] for r in newly] == ["Test Co"]
+    assert emails == []
+    assert telegrams == []
+    saved = read_audit(path)
+    assert str(saved.iloc[0]["allotment_notified"]).strip().lower() in {"true", "1", "yes"}
+
+
+def test_run_check_allotted_and_no_application_emails_one(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "live_audit_log.csv"
+    write_audit(
+        path,
+        pd.DataFrame([_row(registrar="KFin Technologies Limited", company_name="Test Co")]),
+    )
+    emails: list[tuple[str, str, str]] = []
+    telegrams: list[str] = []
+    monkeypatch.setattr(
+        "scripts.check_allotment.send_email",
+        lambda subject, body, to_addr=None, **kw: emails.append((subject, body, to_addr or "")) or True,
+    )
+    monkeypatch.setattr("scripts.check_allotment.send_telegram", lambda text, **kw: telegrams.append(text) or True)
+
+    def fake_checker(page, company, pan):
+        if pan == "ABCDE1234F":
+            return {"status": "allotted", "shares": 100}
+        return {"status": "no_application", "shares": None}
+
+    monkeypatch.setattr("scripts.check_allotment.checker_for_registrar", lambda name: fake_checker)
+    run_check(
+        out_dir=tmp_path,
+        audit_path=path,
+        client=FakeClient(PUBLISHED_HTML),
+        as_of=date(2026, 8, 30),
+        profiles=[
+            {"label": "Dad", "pan": "ABCDE1234F", "email": "dad@example.com"},
+            {"label": "Me", "pan": "PQRST5678G", "email": "me@example.com"},
+        ],
+        page=object(),
+    )
+    assert len(emails) == 1
+    assert emails[0][2] == "dad@example.com"
+    assert "ALLOTTED" in emails[0][1]
+    assert len(telegrams) == 1
+    summary = telegrams[0]
+    assert "1 emailed" in summary
+    assert "1 skipped" in summary
+    assert "ABCDE1234F" not in summary
+    assert "PQRST5678G" not in summary
+    assert "dad@example.com" not in summary
+    assert "Dad" not in summary
+    assert "ALLOTTED" not in summary
