@@ -111,7 +111,13 @@ Be polite: one request at a time, 1.5 second delay, no discussion pages.
 
 The bot discovers IPOs closing today on Chittorgarh, scrapes live GMP and
 total subscription, runs `score_features()`, and sends one Telegram/email
-card per IPO. Details: [docs/codebase/live_alerts.md](docs/codebase/live_alerts.md).
+card per IPO. The Quality Checklist's first scored row is labeled "Total
+Subscription (>20x)" (combined Chittorgarh total, not a retail-only
+breakdown); a 5th informational, unscored "QIB Demand" line shows live
+`sub_qib_x` and does not affect the /4 score. Fresh-capital-only issues
+(no Offer for Sale row on Chittorgarh) now show PASS at 0% OFS instead of
+NOT DISCLOSED; mixed issues that omit the OFS row for another reason still
+show NOT DISCLOSED. Details: [docs/codebase/live_alerts.md](docs/codebase/live_alerts.md).
 
 Local dry-run (prints cards, does not send or write the audit log):
 
@@ -122,29 +128,40 @@ python scripts/live_scanner.py --dry-run --include-open
 
 Weekday crons run on **`main` only** (UTC):
 
+- `45 9 * * 1-5` = **3:15 PM IST** hedge tick. GitHub Actions `schedule`
+  events on a public repo can still delay any of the three ticks by hours
+  (known platform behavior, not a timezone bug); the hedge reduces — not
+  eliminates — the chance of a very late first email.
 - `0 10 * * 1-5` = **3:30 PM IST** primary close-day scan (still inside the
   bidding window; most broker UPI cutoffs are 4:00–4:30 PM IST).
-- `30 10 * * 1-5` = **4:00 PM IST** catch-up. Re-alerts only for a candidate
-  that has no audit row at all from the 3:30 run (a dropped tick, or a
-  brand-new close-today listing) — it no longer re-sends because GMP/Sub
-  moved or a decision flipped. Failure alerts (Telegram+email) fire at
+- `30 10 * * 1-5` = **4:00 PM IST** catch-up. Whichever of the three ticks
+  first writes an audit row for a given `(ipo_id, close_date)` sends the
+  one email for that IPO that day; later ticks that day are silent for
+  that key even if GMP/Sub moved a lot, so three crons cannot cause three
+  emails for the same IPO. Failure alerts (Telegram+email) fire at
   most once per IST calendar day, persisted in `data/live_alert_state.json`
   which the workflow commits even when the scan step fails.
 - `15 4 * * 1-5` = 9:45 AM IST listing-day verification.
 - `30 6 * * 1-5` = 12:00 PM IST allotment-out check.
 
 You do **not** need to click Run every weekday. If Actions shows no
-**Scheduled** run of *Daily IPO close-day alert* after 3:30 PM IST, GitHub
-dropped the tick — click **Run workflow** on **`main`** immediately (a
-next-day retry is too late to bid). SMTP 535 / quoted Windows secrets are
-a separate email-login problem; they do not explain a missing schedule.
+**Scheduled** run of *Daily IPO close-day alert* by ~3:35 PM IST, GitHub
+is delayed or dropped the tick — click **Run workflow** on **`main`**
+immediately (a next-day retry is too late to bid). SMTP 535 / quoted
+Windows secrets are a separate email-login problem; they do not explain a
+missing schedule.
 
 Repo setup: Settings → Actions → General → Workflow permissions →
 **Read and write**. Add secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 (create a bot with @BotFather, message it once, then call `getUpdates`).
 Optional: `GMAIL_USER` and `GMAIL_APP_PASSWORD` (one shared sender).
-Optional: `PAN_PROFILES` JSON (`label` / `pan` / `email`) for per-person
-allotment emails. Lookup is best-effort on KFintech and MUFG Intime only
+Optional: `ALERT_EMAIL_TO` (comma-separated close-day digest recipients;
+if set, To is exactly that list; if unset, falls back to `GMAIL_USER`
+alone). Optional: `PAN_PROFILES` JSON (`label` / `pan` / `email`) for
+per-person allotment emails — that secret is used only by the noon
+allotment checker; putting family emails in `PAN_PROFILES` does **not**
+add them to the close-day digest (use `ALERT_EMAIL_TO` for that). Lookup
+is best-effort on KFintech and MUFG Intime only
 (captcha OCR). Personalized PAN emails are only sent for a confirmed
 Allotted or Not allotted result; a captcha miss, unmatched company,
 unsupported registrar, or "no application found" result stays silent

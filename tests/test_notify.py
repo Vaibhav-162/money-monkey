@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from scripts.notify import (
     _app_password,
+    _checklist_lines,
     _env,
     _redact,
     dispatch,
@@ -66,10 +67,11 @@ def test_format_card_apply_layout_and_human_checklist() -> None:
     assert "0.827%" not in html
     assert "QIB not available" in html
     assert "MODERATE (Score 2/4) - MARKET UNCLEAR" in html
-    assert "❌ Retail Demand (&gt;20x): FAIL" in html
+    assert "❌ Total Subscription (&gt;20x): FAIL" in html
     assert "✅ Fresh Capital / Low OFS: PASS" in html
     assert "✅ Return on Equity (&gt;15%): PASS" in html
     assert "❌ Low Debt-to-Equity: FAIL" in html
+    assert "ℹ️ QIB Demand: QIB not available" in html
     assert "sub_gt_20" not in html
     assert "ofs_lt_50" not in html
     assert "roe_gt_15" not in html
@@ -87,7 +89,7 @@ def test_checklist_not_disclosed_uses_question_icon() -> None:
             ]
         )
     )["html"]
-    assert "❌ Retail Demand (&gt;20x): FAIL" in html
+    assert "❌ Total Subscription (&gt;20x): FAIL" in html
     assert "❓ Fresh Capital / Low OFS: NOT DISCLOSED" in html
     assert "✅ Return on Equity (&gt;15%): PASS" in html
     assert "❌ Low Debt-to-Equity: FAIL" in html
@@ -132,7 +134,24 @@ def test_rank_banner_and_qib() -> None:
     html = format_card(_record(rank_of_day=1, rank_total_of_day=3, sub_qib_x=12.3))["html"]
     assert "Rank 1 of 3 Closing Today" in html
     assert "QIB 12.30x" in html
+    assert "ℹ️ QIB Demand: QIB 12.30x" in html
+    assert html.count("QIB 12.30x") == 2  # hype line + unscored checklist row
     assert format_card(_record())["html"].count("Rank") == 0
+
+
+def test_checklist_is_four_scored_rows_plus_unscored_qib() -> None:
+    missing = _checklist_lines(_record())
+    assert len(missing) == 5
+    assert missing[0].startswith("❌ Total Subscription")
+    assert missing[1].startswith("✅ Fresh Capital / Low OFS")
+    assert missing[2].startswith("✅ Return on Equity")
+    assert missing[3].startswith("❌ Low Debt-to-Equity")
+    assert missing[4] == "ℹ️ QIB Demand: QIB not available"
+    assert "✅" not in missing[4] and "❌" not in missing[4] and "❓" not in missing[4]
+
+    present = _checklist_lines(_record(sub_qib_x=12.3))
+    assert len(present) == 5
+    assert present[4] == "ℹ️ QIB Demand: QIB 12.30x"
 
 
 def test_format_card_stamps_fetch_time_and_dual_sub() -> None:
@@ -216,7 +235,7 @@ def test_send_telegram_uses_html_parse_mode(monkeypatch) -> None:
     assert calls[0][1]["text"] == "<b>card</b>"
 
 
-def test_send_email_uses_html_mime_and_strips_windows_quotes(monkeypatch) -> None:
+def _patch_smtp(monkeypatch) -> dict:
     captured: dict = {}
 
     class FakeSMTP:
@@ -238,15 +257,88 @@ def test_send_email_uses_html_mime_and_strips_windows_quotes(monkeypatch) -> Non
             captured["password"] = password
 
         def sendmail(self, frm, to, raw):
+            captured["from"] = frm
+            captured["to"] = to
             captured["raw"] = raw
 
+    monkeypatch.setattr("scripts.notify.smtplib.SMTP", FakeSMTP)
+    return captured
+
+
+def _gmail_secrets(monkeypatch) -> None:
     monkeypatch.setenv("GMAIL_USER", '"me@gmail.com"')
     monkeypatch.setenv("GMAIL_APP_PASSWORD", '"tasr dzzx ubgi ougf"')
-    monkeypatch.setattr("scripts.notify.smtplib.SMTP", FakeSMTP)
+
+
+def test_send_email_uses_html_mime_and_strips_windows_quotes(monkeypatch) -> None:
+    captured = _patch_smtp(monkeypatch)
+    _gmail_secrets(monkeypatch)
+    monkeypatch.delenv("ALERT_EMAIL_TO", raising=False)
     assert send_email("IPO alert", "<p>hi</p>") is True
     assert captured["user"] == "me@gmail.com"
     assert captured["password"] == "tasrdzzxubgiougf"
+    assert captured["to"] == ["me@gmail.com"]
     assert "text/html" in captured["raw"]
+
+
+def test_send_email_splits_alert_email_to_list(monkeypatch) -> None:
+    captured = _patch_smtp(monkeypatch)
+    _gmail_secrets(monkeypatch)
+    monkeypatch.setenv("ALERT_EMAIL_TO", "a@x.com, b@x.com")
+    assert send_email("IPO alert", "<p>hi</p>") is True
+    assert captured["to"] == ["a@x.com", "b@x.com"]
+    assert "To:" in captured["raw"]
+    assert "a@x.com" in captured["raw"]
+    assert "b@x.com" in captured["raw"]
+
+
+def test_send_email_falls_back_to_user_when_alert_email_to_unset(monkeypatch) -> None:
+    captured = _patch_smtp(monkeypatch)
+    _gmail_secrets(monkeypatch)
+    monkeypatch.delenv("ALERT_EMAIL_TO", raising=False)
+    assert send_email("IPO alert", "<p>hi</p>") is True
+    assert captured["to"] == ["me@gmail.com"]
+
+
+def test_send_email_falls_back_to_user_when_alert_email_to_empty(monkeypatch) -> None:
+    captured = _patch_smtp(monkeypatch)
+    _gmail_secrets(monkeypatch)
+    monkeypatch.setenv("ALERT_EMAIL_TO", "")
+    assert send_email("IPO alert", "<p>hi</p>") is True
+    assert captured["to"] == ["me@gmail.com"]
+
+
+def test_send_email_strips_windows_quotes_on_alert_email_to(monkeypatch) -> None:
+    captured = _patch_smtp(monkeypatch)
+    _gmail_secrets(monkeypatch)
+    monkeypatch.setenv("ALERT_EMAIL_TO", '"a@x.com,b@x.com"')
+    assert send_email("IPO alert", "<p>hi</p>") is True
+    assert captured["to"] == ["a@x.com", "b@x.com"]
+    assert "a@x.com" in captured["raw"]
+    assert "b@x.com" in captured["raw"]
+
+
+def test_send_email_falls_back_to_user_when_alert_email_to_garbage(monkeypatch) -> None:
+    captured = _patch_smtp(monkeypatch)
+    _gmail_secrets(monkeypatch)
+    monkeypatch.setenv("ALERT_EMAIL_TO", " , ")
+    assert send_email("IPO alert", "<p>hi</p>") is True
+    assert captured["to"] == ["me@gmail.com"]
+
+    captured.clear()
+    monkeypatch.setenv("ALERT_EMAIL_TO", ",")
+    assert send_email("IPO alert", "<p>hi</p>") is True
+    assert captured["to"] == ["me@gmail.com"]
+
+
+def test_send_email_explicit_to_addr_is_single_recipient(monkeypatch) -> None:
+    captured = _patch_smtp(monkeypatch)
+    _gmail_secrets(monkeypatch)
+    monkeypatch.setenv("ALERT_EMAIL_TO", "a@x.com, b@x.com")
+    assert send_email("Allotment out: Kwick", "<p>hi</p>", to_addr="dad@example.com") is True
+    assert captured["to"] == ["dad@example.com"]
+    assert "dad@example.com" in captured["raw"]
+    assert "a@x.com" not in captured["raw"]
 
 
 def test_dispatch_sends_one_email_digest(monkeypatch) -> None:

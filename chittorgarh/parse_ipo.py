@@ -610,6 +610,37 @@ def _norm_sale_type(raw: Optional[str]) -> Optional[str]:
     return clean_text(raw)
 
 
+def _resolve_ofs_cr(
+    ofs_cr: Optional[float],
+    ofs_shares: Optional[float],
+    fresh_cr: Optional[float],
+    total_cr: Optional[float],
+    sale_type: Optional[str],
+) -> tuple[Optional[float], Optional[float]]:
+    """Treat a missing OFS row as a disclosed zero on genuinely fresh-only issues.
+
+    Chittorgarh omits the Offer for Sale row for fresh-capital-only IPOs, so
+    parse_shares_and_cr returns (None, None). That is a disclosed 0, not unknown.
+    Mixed / OFS-only / unparseable cases with a missing row stay None.
+    """
+    if ofs_cr is not None:
+        return ofs_cr, ofs_shares
+
+    fresh_only = sale_type == "Fresh capital only"
+    if (
+        not fresh_only
+        and fresh_cr is not None
+        and total_cr is not None
+        and abs(fresh_cr - total_cr) < 0.01
+    ):
+        fresh_only = True
+
+    if not fresh_only:
+        return ofs_cr, ofs_shares
+
+    return 0.0, 0 if ofs_shares is None else ofs_shares
+
+
 def parse_ipo_html(
     html: str,
     url: str,
@@ -722,6 +753,7 @@ def parse_ipo_html(
 
     anchor_kv = _kv_map(classified.get("anchor") or [])
     sale_type = _norm_sale_type(_find_key(details_kv, "sale type"))
+    ofs_cr, ofs_shares = _resolve_ofs_cr(ofs_cr, ofs_shares, fresh_cr, total_cr, sale_type)
 
     master = {
         "ipo_id": ipo_id,

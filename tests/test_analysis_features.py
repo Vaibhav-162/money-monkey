@@ -130,6 +130,22 @@ def test_quality_checklist_missing_debt_is_not_disclosed_pass():
     assert int(quality_ranker(pd.DataFrame([row])).iloc[0]) == 4
 
 
+def test_quality_checklist_zero_ofs_ratio_is_pass_not_undisclosed():
+    row = pd.Series({
+        "sub_total_x": 40.0,
+        "ofs_ratio": 0.0,
+        "roe": 18.0,
+        "debt_equity": 0.3,
+    })
+    checks = {c["name"]: c for c in quality_checklist_for_row(row)}
+    assert checks["ofs_ratio"] == {
+        "name": "ofs_ratio",
+        "value": 0.0,
+        "status": "pass",
+        "awarded": True,
+    }
+
+
 def test_evaluate_quality_checklist_buckets():
     df = pd.DataFrame({
         "exchange_type": ["mainboard"] * 6,
