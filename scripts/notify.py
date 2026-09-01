@@ -19,7 +19,7 @@ _TOKEN_IN_URL = re.compile(r"/bot\d+:[A-Za-z0-9_-]+/")
 
 # Canonical checklist: never print machine keys like sub_gt_20.
 CHECKLIST = (
-    (("subscription", "sub_gt_20"), "Retail Demand (>20x)"),
+    (("subscription", "sub_gt_20"), "Total Subscription (>20x)"),
     (("ofs_ratio", "ofs_lt_50"), "Fresh Capital / Low OFS"),
     (("roe", "roe_gt_15"), "Return on Equity (>15%)"),
     (("debt_equity", "de_le_05"), "Low Debt-to-Equity"),
@@ -87,6 +87,23 @@ def _clean_secret(value: str, *, drop_internal_space: bool = False) -> str:
 
 def _env(name: str) -> str:
     return _clean_secret(os.environ.get(name) or "")
+
+
+def _split_recipients(value: str) -> list[str]:
+    """Split a comma-separated recipient string into unique, stripped addresses."""
+    cleaned = _clean_secret(value)
+    recipients: list[str] = []
+    seen: set[str] = set()
+    for part in cleaned.split(","):
+        addr = part.strip()
+        if not addr:
+            continue
+        key = addr.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        recipients.append(addr)
+    return recipients
 
 
 def _app_password(value: Optional[str] = None) -> str:
@@ -217,13 +234,15 @@ def _breakdown_status_map(record: dict[str, Any]) -> dict[str, str]:
 
 
 def _checklist_lines(record: dict[str, Any]) -> list[str]:
-    """Always the four human rows, in this order, with icons."""
+    """Four scored rows in order, then one informational QIB line."""
     statuses = _breakdown_status_map(record)
     lines = []
     for _keys, label in CHECKLIST:
         status = statuses.get(label, "UNKNOWN")
         pretty = status.replace("_", " ")
         lines.append(f"{_check_icon(status)} {_esc(label)}: {_esc(pretty)}")
+    # Informational only — ℹ️ is distinct from PASS/FAIL/NOT DISCLOSED icons.
+    lines.append(f"ℹ️ QIB Demand: {_esc(_fmt_qib(record))}")
     return lines
 
 
@@ -491,21 +510,26 @@ def send_email(
 ) -> bool:
     user = _clean_secret(user) if user is not None else _env("GMAIL_USER")
     password = _app_password(password if password is not None else None)
-    to_addr = _clean_secret(to_addr) if to_addr is not None else (_env("ALERT_EMAIL_TO") or user)
+    if to_addr is not None:
+        recipients = _split_recipients(to_addr)
+    else:
+        recipients = _split_recipients(_env("ALERT_EMAIL_TO"))
+    if not recipients:
+        recipients = [user] if user else []
     host = host if host is not None else (_env("SMTP_HOST") or "smtp.gmail.com")
     port = port if port is not None else int(_env("SMTP_PORT") or "587")
-    if not user or not password or not to_addr:
+    if not user or not password or not recipients:
         print("[notify] Email skipped (GMAIL_USER / GMAIL_APP_PASSWORD unset)")
         return False
     subtype = "html" if html else "plain"
     msg = MIMEText(body, subtype, "utf-8")
     msg["Subject"] = subject
     msg["From"] = user
-    msg["To"] = to_addr
+    msg["To"] = ", ".join(recipients)
     with smtplib.SMTP(host, port, timeout=30) as smtp:
         smtp.starttls()
         smtp.login(user, password)
-        smtp.sendmail(user, [to_addr], msg.as_string())
+        smtp.sendmail(user, recipients, msg.as_string())
     return True
 
 

@@ -22,16 +22,22 @@ Discovery is static HTML (`chittorgarh/live_dashboard.py`). Detail HTML is
 Schedules run on the **default branch (`main`) only**. A workflow that
 exists only on a feature branch will not fire cron.
 
-1. **15:30 IST (10:00 UTC) weekdays** — `.github/workflows/daily_ipo_alert.yml`
-   runs `python scripts/live_scanner.py --out data`. This is the primary
-   alert, timed so QIB/HNI books are largely in and you still have 30–60
-   minutes before typical broker UPI cutoffs (4:00–4:30 PM IST) and the
-   5:00 PM exchange close. Cards are **live snapshots**, not the final
-   close-day print — GMP/Sub can still move in the last hour.
-2. **16:00 IST (10:30 UTC) weekdays** — the same workflow's catch-up tick.
-   Re-alerts only for a candidate that has **no** audit row at all from the
-   3:30 run (a dropped tick, or a brand-new close-today listing). It no
-   longer re-sends because GMP/Sub moved or a decision flipped. Failure
+1. **15:15 IST (09:45 UTC) hedge, then 15:30 IST (10:00 UTC) primary** —
+   `.github/workflows/daily_ipo_alert.yml` runs
+   `python scripts/live_scanner.py --out data` on both ticks (`45 9` then
+   `0 10`, weekdays). The 3:15 PM IST hedge exists because GitHub Actions
+   `schedule` runs on public repos can be delayed several hours,
+   especially right at the top of an hour; it reduces — not eliminates —
+   the chance of a very late first email. The 3:30 PM IST primary is timed
+   so QIB/HNI books are largely in and you still have 30–60 minutes before
+   typical broker UPI cutoffs (4:00–4:30 PM IST) and the 5:00 PM exchange
+   close. Cards are **live snapshots**, not the final close-day print —
+   GMP/Sub can still move in the last hour.
+2. **16:00 IST (10:30 UTC) weekdays** — the same workflow's catch-up tick
+   (`30 10`). Whichever of the three ticks first writes an audit row for a
+   given `(ipo_id, close_date)` sends the one email for that IPO that day;
+   later ticks that day are silent for that key even if GMP/Sub moved a
+   lot, so three crons cannot cause three emails for the same IPO. Failure
    alerts (Telegram+email) fire at most once per IST calendar day,
    persisted in `data/live_alert_state.json`, which the workflow commits
    even when the scan step fails.
@@ -42,7 +48,14 @@ exists only on a feature branch will not fire cron.
 4. One Telegram message per IPO and one HTML email digest for the run.
    Missing bot/SMTP secrets are a no-op. If a given IPO's scrape or
    scoring step raised, its card says `SCAN ERROR` instead of a decision
-   — it is never rendered as an ordinary `SKIP`.
+   — it is never rendered as an ordinary `SKIP`. Each card's Quality
+   Checklist has four scored rows (/4); the first is labeled "Total
+   Subscription (>20x)" (combined Chittorgarh total, not a retail-only
+   breakdown). A 5th informational, unscored "QIB Demand" line reflects
+   live `sub_qib_x` and does not affect the score. Genuinely
+   fresh-capital-only issues (no Offer for Sale row on Chittorgarh) show
+   PASS at 0% OFS instead of NOT DISCLOSED; mixed issues that omit the OFS
+   row for another reason still show NOT DISCLOSED.
 5. A row is upserted into `data/live_audit_log.csv` on `(ipo_id, close_date)`.
    Each card and row stamps `scraped_at` (UTC + IST) and GMP as-of, and
    labels Sub as Chittorgarh vs InvestorGain when both are present.
@@ -51,10 +64,10 @@ exists only on a feature branch will not fire cron.
    zero rows for *both* boards (a near-certain sign the site HTML changed),
    even though zero *candidates closing today* is a normal, silent no-op.
 
-If Actions has no **Scheduled** run of *Daily IPO close-day alert* after
-3:30 PM IST, GitHub dropped the tick — click **Run workflow** on **`main`**
-immediately. A missed schedule is unrelated to Gmail SMTP 535 (quoted
-Windows `set VAR="value"` secrets).
+If Actions has no **Scheduled** run of *Daily IPO close-day alert* by
+~3:35 PM IST, GitHub delayed or dropped the tick — click **Run workflow**
+on **`main`** immediately. A missed schedule is unrelated to Gmail SMTP
+535 (quoted Windows `set VAR="value"` secrets).
 
 7. **09:45 IST (04:15 UTC) weekdays** — `.github/workflows/verify_outcomes.yml`
    re-fetches the same detail URL. Once listing OHLC is published, it fills
@@ -126,6 +139,7 @@ audit log or send messages.
 | `TELEGRAM_CHAT_ID` | recommended | Message the bot, then `https://api.telegram.org/bot<token>/getUpdates` |
 | `GMAIL_USER` | optional | Gmail address |
 | `GMAIL_APP_PASSWORD` | optional | Google app password (not the account password) |
+| `ALERT_EMAIL_TO` | optional | Comma-separated close-day digest recipients. If set, To is exactly this list; if unset, falls back to `GMAIL_USER` alone. Unrelated to `PAN_PROFILES`. |
 | `PAN_PROFILES` | optional | JSON array of `{label, pan, email}` for personalized allotment results |
 
 `PAN_PROFILES` example (GitHub secret value, not a repo file):
@@ -138,10 +152,13 @@ audit log or send messages.
 ```
 
 One shared `GMAIL_USER` sends each person's result to that profile's
-`email`. PANs and personal emails must stay in GitHub Secrets — never
-commit them, never write them to `data/live_audit_log.csv`. Registrar
-captchas mean lookup is best-effort (KFintech and MUFG Intime only in v1);
-a miss still emails a manual portal link.
+`email`. `PAN_PROFILES` is used only by the noon allotment checker;
+putting family emails there does **not** add them to the close-day digest
+— use `ALERT_EMAIL_TO` for that. PANs and personal emails must stay in
+GitHub Secrets — never commit them, never write them to
+`data/live_audit_log.csv`. Registrar captchas mean lookup is best-effort
+(KFintech and MUFG Intime only in v1); a miss still emails a manual
+portal link.
 
 Local Windows CMD: `set GMAIL_USER=you@gmail.com` — do **not** wrap the
 value in quotes. `set VAR="value"` stores the quote characters, and Gmail
@@ -161,12 +178,13 @@ be committed.
   failure Telegram is the watchdog, not a fix.
 - GMP is often missing for thin SME books. The card must say
   `GMP: not available`, never a fabricated 0.
-- GitHub cron can slip several minutes or drop a tick with no retry,
-  especially the first weekdays after a workflow is added to `main`. The
-  4:00 PM IST catch-up is the in-window backup; after that, click Run
-  workflow on `main`. Do not wait until after 5:00 PM IST — the bid window
-  is closed.
-- 3:30/4:00 PM numbers are mid-afternoon snapshots. Chittorgarh Total x and
+- GitHub cron can slip several minutes, delay by hours, or drop a tick
+  with no retry on a public repo (known platform behavior, especially
+  right at the top of an hour, and the first weekdays after a workflow is
+  added to `main`). The 3:15 PM IST hedge and 4:00 PM IST catch-up are
+  in-window backups; after that, click Run workflow on `main`. Do not
+  wait until after 5:00 PM IST — the bid window is closed.
+- 3:15/3:30/4:00 PM numbers are mid-afternoon snapshots. Chittorgarh Total x and
   InvestorGain Sub can disagree until both vendors catch up near the close.
   The card labels both sources and the fetch time so a snapshot is not
   mistaken for the 6 PM print.

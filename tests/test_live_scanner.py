@@ -196,6 +196,7 @@ def test_run_scan_skips_dispatch_when_row_already_exists(monkeypatch, tmp_path: 
 
 def test_daily_alert_cron_is_inside_bidding_window() -> None:
     text = Path(".github/workflows/daily_ipo_alert.yml").read_text(encoding="utf-8")
+    assert 'cron: "45 9 * * 1-5"' in text
     assert 'cron: "0 10 * * 1-5"' in text
     assert 'cron: "30 10 * * 1-5"' in text
     assert "50 9" not in text
