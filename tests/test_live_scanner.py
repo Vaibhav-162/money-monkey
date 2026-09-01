@@ -203,6 +203,18 @@ def test_daily_alert_cron_is_inside_bidding_window() -> None:
     assert "12 * * 1-5" not in text
 
 
+def test_daily_alert_manual_dispatch_defaults_to_dry_run() -> None:
+    # A stray manual test run must never write the audit log / send alerts
+    # by default: that would silently burn the day's one-alert-per-IPO slot
+    # (presence-only gate) hours before the real scheduled ticks run.
+    text = Path(".github/workflows/daily_ipo_alert.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in text
+    assert "dry_run:" in text
+    assert "default: true" in text
+    assert "--dry-run" in text
+    assert "github.event_name == 'workflow_dispatch' && inputs.dry_run" in text
+
+
 def test_upsert_audit_is_idempotent_on_ipo_and_close(tmp_path: Path) -> None:
     path = tmp_path / "live_audit_log.csv"
     first = [build_alert_record(MASTER, None, {"ipo_id": "2013", "close_date": "2026-08-31", "company_name": "Lumino", "exchange_type": "mainboard"})]

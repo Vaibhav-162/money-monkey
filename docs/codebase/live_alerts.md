@@ -69,6 +69,21 @@ If Actions has no **Scheduled** run of *Daily IPO close-day alert* by
 on **`main`** immediately. A missed schedule is unrelated to Gmail SMTP
 535 (quoted Windows `set VAR="value"` secrets).
 
+**`workflow_dispatch` defaults to a dry run.** Both `daily_ipo_alert.yml`
+and `check_allotment.yml` add a `dry_run` boolean input (default `true`)
+that is passed through as `--dry-run` when the trigger is
+`workflow_dispatch`; `schedule`-triggered runs always ignore the input
+and run for real. This exists because `records_needing_alert` is a pure
+presence check on `(ipo_id, close_date)` — the *first* run of the day to
+see a candidate, test or not, upserts the audit row and is the one that
+sends. Before this input existed, an off-hours manual test (e.g. run
+just after midnight IST) could create that row hours before the real
+3:15/3:30/4:00 PM ticks ran, silently burning the day's one alert for
+that IPO before the bidding window even opened. To force a real send
+from the UI (e.g. backfilling a dropped scheduled tick), untick the
+`dry_run` checkbox before clicking **Run workflow**; via `gh`, use
+`gh workflow run daily_ipo_alert.yml -f dry_run=false`.
+
 7. **09:45 IST (04:15 UTC) weekdays** — `.github/workflows/verify_outcomes.yml`
    re-fetches the same detail URL. Once listing OHLC is published, it fills
    `actual_listing_open`, `actual_open_return_pct`, `actual_is_clean_pop` and

@@ -11,6 +11,11 @@ on:
     # 4:00 PM IST (10:30 UTC) — catch-up if GitHub dropped the 3:30 tick (presence-only).
     - cron: "30 10 * * 1-5"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: print cards only, do not write the audit log or send mail/Telegram. Uncheck to force a real send."
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -40,7 +45,9 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
-        run: python scripts/live_scanner.py --out data
+        run: >
+          python scripts/live_scanner.py --out data
+          ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
 
       - name: Commit audit log
         if: always()

@@ -353,3 +353,15 @@ def test_run_check_allotted_and_no_application_emails_one(tmp_path: Path, monkey
     assert "dad@example.com" not in summary
     assert "Dad" not in summary
     assert "ALLOTTED" not in summary
+
+
+def test_allotment_manual_dispatch_defaults_to_dry_run() -> None:
+    # Same rationale as the daily scanner: a stray manual test must not
+    # write real notification flags before the real 12:00 PM IST tick runs.
+    text = Path(".github/workflows/check_allotment.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in text
+    assert "dry_run:" in text
+    assert "default: true" in text
+    assert "--dry-run" in text
+    assert "github.event_name == 'workflow_dispatch' && inputs.dry_run" in text
+

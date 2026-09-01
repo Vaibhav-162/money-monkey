@@ -151,6 +151,16 @@ immediately (a next-day retry is too late to bid). SMTP 535 / quoted
 Windows secrets are a separate email-login problem; they do not explain a
 missing schedule.
 
+**Manual "Run workflow" clicks default to a dry run.** Both
+`daily_ipo_alert.yml` and `check_allotment.yml` expose a `dry_run`
+checkbox (default **checked**) on `workflow_dispatch`: it prints results
+but never writes the audit log or sends mail/Telegram, so ad-hoc testing
+can never consume the one-alert-per-IPO-per-day slot that a real
+scheduled tick would otherwise use later that day. **Uncheck the box**
+when you actually need a real backup send (e.g. a dropped 3:30/4:00 PM
+tick) — scheduled `cron` runs always ignore this input and send for
+real.
+
 Repo setup: Settings → Actions → General → Workflow permissions →
 **Read and write**. Add secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 (create a bot with @BotFather, message it once, then call `getUpdates`).
