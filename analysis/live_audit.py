@@ -186,6 +186,48 @@ def _iso(value: Any) -> Any:
     return value
 
 
+def _canonical_ipo_id(value: Any) -> str:
+    """Stable audit-key form: int 2013, '2013', and '2013.0' all become '2013'."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "nat", "<na>"}:
+        return ""
+    try:
+        num = float(text)
+    except (TypeError, ValueError):
+        return text
+    if num != num:
+        return ""
+    as_int = int(num)
+    if num == as_int:
+        return str(as_int)
+    return text
+
+
+def _canonical_close_date(value: Any) -> str:
+    """Stable audit-key form: date, datetime, and 'YYYY-MM-DDTHH:MM:SS' → 'YYYY-MM-DD'."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    if hasattr(value, "isoformat") and not isinstance(value, (str, bytes)):
+        text = value.isoformat()
+    else:
+        text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "nat", "<na>"}:
+        return ""
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return text
+
+
+def _audit_key(ipo_id: Any, close_date: Any) -> str:
+    return f"{_canonical_ipo_id(ipo_id)}|{_canonical_close_date(close_date)}"
+
+
+def _key_series(frame: pd.DataFrame) -> pd.Series:
+    return frame["ipo_id"].map(_canonical_ipo_id) + "|" + frame["close_date"].map(_canonical_close_date)
+
+
 def to_score_row(master: dict[str, Any], close_date: str | None = None) -> dict[str, Any]:
     """Map a live scrape master row onto score_features() inputs. S1/S2 schema unchanged."""
     row = dict(master)
@@ -211,10 +253,12 @@ def build_alert_record(
             "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "scraped_at_utc": master.get("scraped_at_utc"),
             "scraped_at_ist": master.get("scraped_at_ist"),
-            "ipo_id": str(discovery.get("ipo_id") or master.get("ipo_id") or ""),
+            "ipo_id": _canonical_ipo_id(discovery.get("ipo_id") or master.get("ipo_id") or ""),
             "company_name": discovery.get("company_name") or master.get("company_name"),
             "board": discovery.get("exchange_type") or master.get("exchange_type"),
-            "close_date": discovery.get("close_date") or _iso(master.get("ipo_close")),
+            "close_date": _canonical_close_date(
+                discovery.get("close_date") or _iso(master.get("ipo_close"))
+            ),
             "url": discovery.get("url") or master.get("url"),
             "price_band_high": master.get("price_band_high"),
             "issue_price": master.get("issue_price"),
@@ -269,11 +313,17 @@ def upsert_audit(path: Path, records: list[dict[str, Any]]) -> pd.DataFrame:
         if col not in incoming.columns:
             incoming[col] = None
     incoming = incoming[AUDIT_COLUMNS]
+    incoming["ipo_id"] = incoming["ipo_id"].map(_canonical_ipo_id)
+    incoming["close_date"] = incoming["close_date"].map(_canonical_close_date)
+    incoming["_key"] = _key_series(incoming)
+    incoming = incoming.drop_duplicates(subset="_key", keep="last")
     if current.empty:
-        incoming.to_csv(path, index=False)
-        return incoming
-    current["_key"] = current["ipo_id"].astype(str) + "|" + current["close_date"].astype(str)
-    incoming["_key"] = incoming["ipo_id"].astype(str) + "|" + incoming["close_date"].astype(str)
+        out = incoming.drop(columns=["_key"])
+        out.to_csv(path, index=False)
+        return out
+    current["ipo_id"] = current["ipo_id"].map(_canonical_ipo_id)
+    current["close_date"] = current["close_date"].map(_canonical_close_date)
+    current["_key"] = _key_series(current)
     # Defensive: a hand-edited or previously-buggy CSV could contain duplicate
     # keys, which would make prior.loc[key] return a DataFrame instead of a
     # Series below and crash the scalar assignment. Keep the last occurrence.
@@ -421,11 +471,11 @@ def records_needing_alert(
     if existing is None or existing.empty:
         return list(records)
     keyed = existing.copy()
-    keyed["_key"] = keyed["ipo_id"].astype(str) + "|" + keyed["close_date"].astype(str)
+    keyed["_key"] = _key_series(keyed)
     keyed = keyed.drop_duplicates(subset="_key", keep="last").set_index("_key")
     out: list[dict[str, Any]] = []
     for rec in records:
-        key = f"{rec.get('ipo_id') or ''}|{rec.get('close_date') or ''}"
+        key = _audit_key(rec.get("ipo_id"), rec.get("close_date"))
         if key not in keyed.index:
             out.append(rec)
     return out

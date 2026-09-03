@@ -134,6 +134,62 @@ def test_records_needing_alert_only_alerts_when_row_missing() -> None:
     assert records_needing_alert([same], None) == [same]
 
 
+def test_records_needing_alert_normalizes_ipo_id_and_close_date() -> None:
+    import pandas as pd
+    from datetime import date, datetime
+
+    prior = pd.DataFrame([{"ipo_id": "2013.0", "close_date": "2026-08-31T00:00:00"}])
+    # Same IPO: float-ish id / date object / ISO datetime must not re-alert.
+    assert records_needing_alert(
+        [{"ipo_id": 2013, "close_date": "2026-08-31"}], prior
+    ) == []
+    assert records_needing_alert(
+        [{"ipo_id": "2013", "close_date": date(2026, 8, 31)}], prior
+    ) == []
+    assert records_needing_alert(
+        [{"ipo_id": "2013", "close_date": datetime(2026, 8, 31, 10, 0)}], prior
+    ) == []
+    # A different IPO still alerts.
+    fresh = {"ipo_id": "9999", "close_date": "2026-08-31"}
+    assert records_needing_alert([fresh], prior) == [fresh]
+
+
+def test_upsert_audit_collapses_canonical_duplicate_keys(tmp_path: Path) -> None:
+    path = tmp_path / "live_audit_log.csv"
+    first = [
+        build_alert_record(
+            MASTER, None, {"ipo_id": "2013.0", "close_date": "2026-08-31T00:00:00", "company_name": "Lumino"}
+        )
+    ]
+    upsert_audit(path, first)
+    second = [
+        build_alert_record(
+            {**MASTER, "gmp_rs": 99},
+            None,
+            {"ipo_id": 2013, "close_date": "2026-08-31", "company_name": "Lumino"},
+        )
+    ]
+    out = upsert_audit(path, second)
+    assert len(out) == 1
+    assert str(out.iloc[0]["ipo_id"]) == "2013"
+    assert str(out.iloc[0]["close_date"]) == "2026-08-31"
+    assert float(out.iloc[0]["gmp_rs"]) == 99
+
+    # Two incoming rows that only look different before canonicalization.
+    twins = [
+        build_alert_record(MASTER, None, {"ipo_id": "8888", "close_date": "2026-09-01", "company_name": "A"}),
+        build_alert_record(
+            {**MASTER, "gmp_rs": 1},
+            None,
+            {"ipo_id": "8888.0", "close_date": "2026-09-01T00:00:00", "company_name": "A"},
+        ),
+    ]
+    out2 = upsert_audit(path, twins)
+    ids = list(out2["ipo_id"].astype(str))
+    assert ids.count("8888") == 1
+    assert ids.count("2013") == 1
+
+
 def test_run_scan_skips_dispatch_when_row_already_exists(monkeypatch, tmp_path: Path) -> None:
     discovery = {
         "ipo_id": "2013",

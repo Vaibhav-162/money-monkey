@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 
 from analysis.live_audit import AUDIT_COLUMNS, read_audit, write_audit
 from chittorgarh.parse_ipo import parse_allotment_published
+from chittorgarh.registrar_allotment import RegistrarLookupBatchError
 from scripts.check_allotment import (
     dispatch_allotment,
     dispatch_pan_results,
@@ -410,6 +411,20 @@ def test_dispatch_pan_results_raises_when_all_profile_emails_fail(monkeypatch) -
     )
     record = {"company_name": "Test Co", "registrar": "KFin Technologies"}
     with pytest.raises(NotificationDeliveryError):
+        dispatch_pan_results(record, profiles, page=object(), dry_run=False)
+
+
+def test_dispatch_pan_results_raises_when_every_lookup_fails(monkeypatch) -> None:
+    profiles = [
+        {"label": "Dad", "pan": "ABCDE1234F", "email": "dad@example.com"},
+        {"label": "Me", "pan": "PQRST5678G", "email": "me@example.com"},
+    ]
+    monkeypatch.setattr(
+        "scripts.check_allotment.checker_for_registrar",
+        lambda name: (lambda page, company, pan: {"status": "captcha_failed", "shares": None}),
+    )
+    record = {"company_name": "Test Co", "registrar": "KFin Technologies"}
+    with pytest.raises(RegistrarLookupBatchError):
         dispatch_pan_results(record, profiles, page=object(), dry_run=False)
 
 

@@ -693,6 +693,17 @@ def _resolve_ofs_cr(
     if ofs_cr is not None:
         return ofs_cr, ofs_shares
 
+    # Numbers contradict a fresh-only reading (total > fresh by more than
+    # rounding). The missing OFS row is unknown, not a disclosed zero — a
+    # false PASS at 0% OFS would hide a real cash-out red flag.
+    sizes_disagree = (
+        fresh_cr is not None
+        and total_cr is not None
+        and abs(fresh_cr - total_cr) >= 0.01
+    )
+    if sizes_disagree or sale_type in {"OFS only", "Fresh capital cum OFS"}:
+        return ofs_cr, ofs_shares
+
     fresh_only = sale_type == "Fresh capital only"
     if (
         not fresh_only

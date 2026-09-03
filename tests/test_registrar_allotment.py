@@ -1,13 +1,17 @@
 import json
 
 from chittorgarh.registrar_allotment import (
+    RegistrarLookupBatchError,
     _with_retries,
+    assess_lookup_batch,
     checker_for_registrar,
     find_company_option,
     load_pan_profiles,
     mask_pan,
     parse_result_blob,
+    raise_if_systematic_lookup_failure,
 )
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 
 def test_mask_pan_hides_middle() -> None:
@@ -55,6 +59,14 @@ def test_parse_result_blob_statuses() -> None:
     allotted = parse_result_blob("Congratulations. Shares Allotted 1600")
     assert allotted["status"] == "allotted"
     assert allotted["shares"] == 1600
+    # Regression: "0 share" as a substring of "1600 shares" / "10 shares"
+    # used to classify a real allotment as not_allotted.
+    lots = parse_result_blob("Congratulations. Shares Allotted 1600 shares")
+    assert lots == {"status": "allotted", "shares": 1600}
+    ten = parse_result_blob("Status: Allotted 10 shares")
+    assert ten == {"status": "allotted", "shares": 10}
+    assert parse_result_blob("Allotted 0 shares") == {"status": "not_allotted", "shares": 0}
+    assert parse_result_blob("Number of shares: 0 share") == {"status": "not_allotted", "shares": 0}
     assert parse_result_blob("")["status"] == "captcha_failed"
     assert parse_result_blob("Unexpected registrar HTML")["status"] == "lookup_failed"
 
@@ -106,6 +118,50 @@ def test_with_retries_only_repeats_captcha_failed() -> None:
 
     assert _with_retries(unrecognized)["status"] == "lookup_failed"
     assert n5["i"] == 1
+
+
+def test_with_retries_does_not_label_unexpected_errors_as_captcha() -> None:
+    n = {"i": 0}
+
+    def boom():
+        n["i"] += 1
+        raise RuntimeError("select not found")
+
+    assert _with_retries(boom) == {"status": "lookup_failed", "shares": None}
+    assert n["i"] == 1
+
+    timeouts = {"i": 0}
+
+    def slow():
+        timeouts["i"] += 1
+        raise PlaywrightTimeout("nav")
+
+    assert _with_retries(slow) == {"status": "captcha_failed", "shares": None}
+    assert timeouts["i"] == 4
+
+
+def test_assess_lookup_batch_escalates_only_on_total_failure() -> None:
+    miss = {"status": "captcha_failed", "shares": None}
+    ok = {"status": "allotted", "shares": 10}
+    none_applied = {"status": "no_application", "shares": None}
+    broken = {"status": "lookup_failed", "shares": None}
+
+    assert assess_lookup_batch([])["escalate"] is False
+    assert assess_lookup_batch([miss])["escalate"] is False
+    assert assess_lookup_batch([miss, miss])["escalate"] is True
+    assert assess_lookup_batch([broken, broken])["escalate"] is True
+    assert assess_lookup_batch([ok, miss])["escalate"] is False
+    assert assess_lookup_batch([none_applied, none_applied])["escalate"] is False
+    assert assess_lookup_batch(
+        [{"status": "company_not_found", "shares": None}] * 2
+    )["escalate"] is True
+
+    raise_if_systematic_lookup_failure([ok, miss])
+    try:
+        raise_if_systematic_lookup_failure([miss, broken])
+        raise AssertionError("expected RegistrarLookupBatchError")
+    except RegistrarLookupBatchError as exc:
+        assert "2 registrar lookup" in str(exc)
 
 
 def test_checker_for_registrar_supported_and_unsupported() -> None:

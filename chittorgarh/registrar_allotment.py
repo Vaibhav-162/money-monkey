@@ -38,6 +38,11 @@ FUNCTIONS / CLASSES IN THIS FILE
 - `solve_captcha(image_bytes)`: OCR; empty string on missing deps or fail.
 - `parse_result_blob(text)`: map visible page text to
   allotted / not_allotted / no_application / captcha_failed / lookup_failed.
+- `assess_lookup_batch(results)` / `raise_if_systematic_lookup_failure(results)`:
+  distinguish a one-off captcha/company miss from "every lookup in this
+  run failed" (page-structure or OCR break). Callers such as
+  `scripts/check_allotment.py` should invoke this after a batch.
+- `RegistrarLookupBatchError`: raised only on that total-failure case.
 - `checker_for_registrar(name)`: pick `check_kfintech`, `check_mufg`, or
   None from the registrar string `parse_ipo` stored on the master row.
 - `check_kfintech(page, company_name, pan)` / `check_mufg(...)`: public
@@ -53,7 +58,7 @@ import json
 import os
 import re
 from difflib import SequenceMatcher
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
@@ -188,14 +193,19 @@ def parse_result_blob(text: str) -> dict[str, Any]:
         return {"status": "captcha_failed", "shares": None}
     if any(tok in blob for tok in ("no application", "no record", "not found", "no data found", "no details found")):
         return {"status": "no_application", "shares": None}
-    if "not allotted" in blob or "not alloted" in blob or "0 share" in blob:
+    if "not allotted" in blob or "not alloted" in blob:
         return {"status": "not_allotted", "shares": 0}
     shares = None
     share_match = re.search(r"(?:allotted|allotment)\D{0,24}(\d[\d,]*)", blob)
     if share_match:
-        shares = parse_number(share_match.group(1))
-        if shares is not None:
-            shares = int(shares)
+        parsed = parse_number(share_match.group(1))
+        if parsed is not None:
+            shares = int(parsed)
+    # "0 share" as a substring matches "1600 shares" / "10 shares"; require a
+    # true zero count (no digit immediately before the 0).
+    zero_shares = re.search(r"(?<!\d)0\s*shares?\b", blob) is not None
+    if shares == 0 or zero_shares:
+        return {"status": "not_allotted", "shares": 0}
     if "allotted" in blob or "allotment of" in blob:
         return {"status": "allotted", "shares": shares}
     return {"status": "lookup_failed", "shares": None}
@@ -352,13 +362,74 @@ def _with_retries(once: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         try:
             last = once()
         except PlaywrightTimeout:
+            # Transient: the portal was slow. Retry like a captcha miss.
             last = {"status": "captcha_failed", "shares": None}
         except Exception as exc:
+            # Selector/page-structure break, not an OCR miss. Do not retry as
+            # captcha_failed — that made a systematically broken portal look
+            # like a normal one-off captcha failure.
             print(f"[allotment] registrar lookup error: {exc}")
-            last = {"status": "captcha_failed", "shares": None}
+            last = {"status": "lookup_failed", "shares": None}
         if last.get("status") != "captcha_failed":
             return last
     return last
+
+
+_RESOLVED_LOOKUP_STATUSES = frozenset({"allotted", "not_allotted", "no_application"})
+_FAILED_LOOKUP_STATUSES = frozenset({"captcha_failed", "lookup_failed", "company_not_found"})
+
+
+class RegistrarLookupBatchError(RuntimeError):
+    """Every attempted registrar lookup in a run failed; likely a site/OCR break."""
+
+
+def assess_lookup_batch(
+    results: Sequence[dict[str, Any] | None],
+    *,
+    min_attempts: int = 2,
+) -> dict[str, Any]:
+    """Detect 'every lookup failed' vs a documented per-item miss.
+
+    A single `captcha_failed` is a normal OCR miss. The same status on every
+    attempt in a run (2+ lookups, zero resolved answers) means Tesseract, the
+    captcha widget, or the page structure is broken — indistinguishable from a
+    one-off miss unless we count. `no_application` is a real registrar answer.
+
+    Does not send alerts; callers should raise on `escalate` (see
+    `raise_if_systematic_lookup_failure`). Empty input does not escalate
+    (nothing was attempted — unconfigured PAN list / unsupported registrar).
+    """
+    statuses = [str((row or {}).get("status") or "") for row in results]
+    n = len(statuses)
+    n_ok = sum(1 for status in statuses if status in _RESOLVED_LOOKUP_STATUSES)
+    n_fail = sum(1 for status in statuses if status in _FAILED_LOOKUP_STATUSES)
+    escalate = n >= min_attempts and n_ok == 0 and n_fail == n
+    counts = ", ".join(f"{s}={statuses.count(s)}" for s in sorted(set(statuses))) or "none"
+    reason = (
+        f"All {n} registrar lookup(s) failed ({counts}); "
+        "page structure or captcha OCR is likely broken"
+        if escalate
+        else ""
+    )
+    return {
+        "n": n,
+        "n_ok": n_ok,
+        "n_fail": n_fail,
+        "escalate": escalate,
+        "reason": reason,
+    }
+
+
+def raise_if_systematic_lookup_failure(
+    results: Sequence[dict[str, Any] | None],
+    *,
+    min_attempts: int = 2,
+) -> None:
+    """No-op unless every attempted lookup failed. See `assess_lookup_batch`."""
+    verdict = assess_lookup_batch(results, min_attempts=min_attempts)
+    if verdict["escalate"]:
+        print(f"[allotment] {verdict['reason']}")
+        raise RegistrarLookupBatchError(verdict["reason"])
 
 
 def check_kfintech(page: Page, company_name: str, pan: str) -> dict[str, Any]:

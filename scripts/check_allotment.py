@@ -120,7 +120,12 @@ from chittorgarh.browser import chromium_session
 from chittorgarh.http import HttpClient
 from chittorgarh.live_dashboard import today_ist
 from chittorgarh.parse_ipo import parse_ipo_html
-from chittorgarh.registrar_allotment import checker_for_registrar, load_pan_profiles, mask_pan
+from chittorgarh.registrar_allotment import (
+    checker_for_registrar,
+    load_pan_profiles,
+    mask_pan,
+    raise_if_systematic_lookup_failure,
+)
 from scripts.notify import (
     NotificationDeliveryError,
     _redact,
@@ -228,7 +233,7 @@ def _lookup_status(checker, page, company: str, pan: str) -> dict[str, Any]:
         return checker(page, company, pan)
     except Exception as exc:
         print(f"[allotment] checker error for {mask_pan(pan)}: {exc}")
-        return {"status": "captcha_failed", "shares": None}
+        return {"status": "lookup_failed", "shares": None}
 
 
 def dispatch_pan_results(
@@ -246,10 +251,12 @@ def dispatch_pan_results(
     n_skipped = 0
     email_attempts = 0
     email_errors: list[str] = []
+    lookup_results: list[dict[str, Any]] = []
     for profile in profiles:
         result: dict[str, Any] | None = None
         if checker is not None and page is not None:
             result = _lookup_status(checker, page, company, profile["pan"])
+            lookup_results.append(result)
         status = (result or {}).get("status")
         if status not in EMAIL_STATUSES:
             n_skipped += 1
@@ -277,6 +284,8 @@ def dispatch_pan_results(
             msg = f"Email error for {label}: {_redact(str(exc))}"
             print(f"[allotment] {msg}")
             email_errors.append(msg)
+
+    raise_if_systematic_lookup_failure(lookup_results)
 
     # Every profile that reached EMAIL_STATUSES got a real send attempt and
     # every one threw -- not the intentional "Gmail unset" False return.
