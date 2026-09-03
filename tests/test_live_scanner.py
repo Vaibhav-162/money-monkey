@@ -215,6 +215,19 @@ def test_daily_alert_manual_dispatch_defaults_to_dry_run() -> None:
     assert "github.event_name == 'workflow_dispatch' && inputs.dry_run" in text
 
 
+def test_daily_alert_repository_dispatch_is_live_not_dry_run() -> None:
+    # cron-job.org POSTs event_type trigger-daily-ipo-alert. That must
+    # start a real send; --dry-run is only for workflow_dispatch.
+    text = Path(".github/workflows/daily_ipo_alert.yml").read_text(encoding="utf-8")
+    assert "repository_dispatch:" in text
+    assert "types: [trigger-daily-ipo-alert]" in text
+    dry_run_line = next(
+        line for line in text.splitlines() if "--dry-run" in line and "github.event_name" in line
+    )
+    assert "workflow_dispatch" in dry_run_line
+    assert "repository_dispatch" not in dry_run_line
+
+
 def test_upsert_audit_is_idempotent_on_ipo_and_close(tmp_path: Path) -> None:
     path = tmp_path / "live_audit_log.csv"
     first = [build_alert_record(MASTER, None, {"ipo_id": "2013", "close_date": "2026-08-31", "company_name": "Lumino", "exchange_type": "mainboard"})]

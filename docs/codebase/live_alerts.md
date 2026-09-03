@@ -41,6 +41,17 @@ exists only on a feature branch will not fire cron.
    alerts (Telegram+email) fire at most once per IST calendar day,
    persisted in `data/live_alert_state.json`, which the workflow commits
    even when the scan step fails.
+
+   An external weekday **15:30 IST** POST from cron-job.org fires the same
+   workflow via `repository_dispatch` type `trigger-daily-ipo-alert` so
+   the first card is not waiting in GitHub's public-repo schedule queue.
+   The three `schedule` ticks remain as delayed backup. The presence-only
+   gate still means one email per `(ipo_id, close_date)` that day. A
+   dispatch is a live send (not `workflow_dispatch` dry-run). The PAT is
+   Contents read/write on this repo only and must never be committed.
+   HTTP 204 means GitHub accepted the webhook; confirm Actions shows
+   event `repository_dispatch`. Endpoint:
+   `https://api.github.com/repos/Vaibhav-162/money-monkey/dispatches`.
 3. IPOs with `close_date == today (IST)` are scraped and passed through
    `to_score_row()` → `score_features()`. Strategy 1 `p_allot` still uses
    Chittorgarh `sub_total_x` (the training source). InvestorGain
@@ -64,16 +75,19 @@ exists only on a feature branch will not fire cron.
    zero rows for *both* boards (a near-certain sign the site HTML changed),
    even though zero *candidates closing today* is a normal, silent no-op.
 
-If Actions has no **Scheduled** run of *Daily IPO close-day alert* by
-~3:35 PM IST, GitHub delayed or dropped the tick — click **Run workflow**
-on **`main`** immediately. A missed schedule is unrelated to Gmail SMTP
-535 (quoted Windows `set VAR="value"` secrets).
+If Actions has no **Scheduled** or **repository_dispatch** run of
+*Daily IPO close-day alert* by ~3:35 PM IST, both clocks missed — click
+**Run workflow** on **`main`** with dry_run unchecked immediately. A
+missed schedule is unrelated to Gmail SMTP 535 (quoted Windows
+`set VAR="value"` secrets).
 
 **`workflow_dispatch` defaults to a dry run.** Both `daily_ipo_alert.yml`
 and `check_allotment.yml` add a `dry_run` boolean input (default `true`)
 that is passed through as `--dry-run` when the trigger is
 `workflow_dispatch`; `schedule`-triggered runs always ignore the input
-and run for real. This exists because `records_needing_alert` is a pure
+and run for real. A cron-job.org `repository_dispatch`
+(`trigger-daily-ipo-alert`) is also live — it does not use `inputs.dry_run`.
+This exists because `records_needing_alert` is a pure
 presence check on `(ipo_id, close_date)` — the *first* run of the day to
 see a candidate, test or not, upserts the audit row and is the one that
 sends. Before this input existed, an off-hours manual test (e.g. run
@@ -196,9 +210,11 @@ be committed.
 - GitHub cron can slip several minutes, delay by hours, or drop a tick
   with no retry on a public repo (known platform behavior, especially
   right at the top of an hour, and the first weekdays after a workflow is
-  added to `main`). The 3:15 PM IST hedge and 4:00 PM IST catch-up are
-  in-window backups; after that, click Run workflow on `main`. Do not
-  wait until after 5:00 PM IST — the bid window is closed.
+  added to `main`). The on-time clock is the 3:30 PM IST cron-job.org
+  `repository_dispatch`; the 3:15 PM IST hedge and 4:00 PM IST catch-up
+  stay as in-window GitHub backups. If both miss, click Run workflow on
+  `main` with dry_run unchecked. Do not wait until after 5:00 PM IST —
+  the bid window is closed.
 - 3:15/3:30/4:00 PM numbers are mid-afternoon snapshots. Chittorgarh Total x and
   InvestorGain Sub can disagree until both vendors catch up near the close.
   The card labels both sources and the fetch time so a snapshot is not

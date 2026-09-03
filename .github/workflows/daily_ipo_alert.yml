@@ -16,6 +16,10 @@ on:
         description: "Dry run: print cards only, do not write the audit log or send mail/Telegram. Uncheck to force a real send."
         type: boolean
         default: true
+  # External clock (cron-job.org POST /dispatches). Runs live, same as
+  # schedule — does not use workflow_dispatch.inputs.dry_run.
+  repository_dispatch:
+    types: [trigger-daily-ipo-alert]
 
 permissions:
   contents: write

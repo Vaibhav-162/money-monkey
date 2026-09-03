@@ -141,12 +141,22 @@ Weekday crons run on **`main` only** (UTC):
   emails for the same IPO. Failure alerts (Telegram+email) fire at
   most once per IST calendar day, persisted in `data/live_alert_state.json`
   which the workflow commits even when the scan step fails.
+- External **3:30 PM IST** weekday POST (cron-job.org →
+  `repository_dispatch` type `trigger-daily-ipo-alert`) is the on-time
+  clock; GitHub's three `schedule` ticks stay as delayed backup. Same
+  presence-only gate, so both clocks cannot send two emails for one IPO.
+  That dispatch is a **live** send (not the UI dry-run). The PAT lives
+  only in cron-job.org (fine-grained, this repo, Contents read/write) —
+  never commit it. HTTP 204 means GitHub accepted the webhook; confirm
+  Actions shows event `repository_dispatch`. URL:
+  `https://api.github.com/repos/Vaibhav-162/money-monkey/dispatches`.
 - `15 4 * * 1-5` = 9:45 AM IST listing-day verification.
 - `30 6 * * 1-5` = 12:00 PM IST allotment-out check.
 
 You do **not** need to click Run every weekday. If Actions shows no
-**Scheduled** run of *Daily IPO close-day alert* by ~3:35 PM IST, GitHub
-is delayed or dropped the tick — click **Run workflow** on **`main`**
+**Scheduled** or **repository_dispatch** run of *Daily IPO close-day
+alert* by ~3:35 PM IST, the external clock and GitHub both missed —
+click **Run workflow** on **`main`** with dry_run **unchecked**
 immediately (a next-day retry is too late to bid). SMTP 535 / quoted
 Windows secrets are a separate email-login problem; they do not explain a
 missing schedule.
@@ -158,8 +168,8 @@ but never writes the audit log or sends mail/Telegram, so ad-hoc testing
 can never consume the one-alert-per-IPO-per-day slot that a real
 scheduled tick would otherwise use later that day. **Uncheck the box**
 when you actually need a real backup send (e.g. a dropped 3:30/4:00 PM
-tick) — scheduled `cron` runs always ignore this input and send for
-real.
+tick) — scheduled `cron` runs and cron-job.org `repository_dispatch`
+always ignore this input and send for real.
 
 Repo setup: Settings → Actions → General → Workflow permissions →
 **Read and write**. Add secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
