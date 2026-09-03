@@ -1,4 +1,80 @@
-"""Rolling walk-forward by listing year. Never random K-fold. Per-board only."""
+"""Rolling walk-forward by listing year. Never random K-fold. Per-board only.
+
+WHAT THIS FILE DOES
+--------------------
+Replays historical Apply/Skip decisions year by year so we never train on
+IPOs that had not listed yet. Each fold trains on earlier `listing_year`s
+and tests the next year, separately for `mainboard` and `sme`. Random
+K-fold is forbidden here: IPOs are a time series, and a shuffled split
+would let the model see the future.
+
+`run_analysis.py` is the only production caller. It runs `walk_forward_s1`
+and `walk_forward_s2` per board (metrics → `s1_walkforward.json` /
+`s2_walkforward.json`), then `pooled_ablation_s1` and
+`stop_loss_sensitivity` (comparison artifacts only). This file calls
+`analysis.models` (`fit_s1` / `fit_s2`, `predict_*`, `calibrate_threshold`,
+`save_bundle`). Walk-forward *does* pickle the last fold's bundle, but
+`run_analysis.py` immediately re-fits on all 2020+ rows and overwrites
+those files — the delivered scorer is the full-history fit, with S1's
+`apply_threshold` copied from the last non-skipped walk-forward year.
+
+KEY TERMS USED HERE
+--------------------
+- Walk-forward validation: rolling train-on-past / test-on-next-year.
+  S1 starts test years at 2021 (train needs 2020+); S2 at 2018 when
+  enough `exret_126` labels exist. A year with <40 train or <8 test
+  rows is recorded as `skipped`, not scored.
+- Mainboard vs SME: each walk is one `exchange_type`. The delivered
+  scorer never mixes them; `pooled_ablation_s1` is the one-time
+  "what if we ignored that rule" comparison.
+- LightGBM / `FittedBundle`: fitted by `models.fit_*` each fold.
+  S1 also gets a probability cutoff from `calibrate_threshold`.
+- Clean pop (`is_clean_pop`): S1 label — a strong, held first-day jump.
+  Fold metrics include pop rate among Apply rows and precision@top-10%.
+- EV / `realized_ev`: historical rupee profit per lot (allotment ×
+  open-day gain × haircut). The S1 apply cutoff is chosen to maximize
+  mean EV on that fold's *test* rows — so the reported `apply_mean_ev`
+  is after a threshold that saw those labels.
+- Brier score: mean squared error of predicted probabilities vs the
+  0/1 clean-pop label. Lower means better-calibrated probabilities;
+  it is a diagnostic, not the threshold objective.
+- SHAP (`shap_top`): which features drove that fold's model, copied
+  into the JSON so a year-to-year drift is visible.
+- `exret_126` / `s2_beat` / `ret_126` / `mdd_126`: 6-month Nifty-excess
+  return, "beat Nifty by >5%", raw 126-session return, and max drawdown.
+  These evaluate the *research* S2 regressor, not live `apply_s2`
+  (which is the quality checklist in `score.py`).
+- Information Ratio / CAGR proxies: cross-sectional stand-ins (mean/std
+  of one fold's top-30% excess returns; average of each pick's own
+  126-session return annualized). Named `_proxy` because there is one
+  observation per IPO, not a daily portfolio series.
+- Pooled ablation: one S1 model trained on mainboard+SME together.
+  Never the delivered scorer — it exists to quantify what we give up
+  by refusing to pool.
+- Stop-loss sensitivity: *hypothetical* table only. Primary S1 EV
+  assumes you sell at the listing open, so an intraday stop cannot
+  fire. This asks "what if I held through day 1 with a protective
+  stop instead?" and is never fed into training or `score_features()`.
+- Quality-ranker fallback: when a board lacks ≥40 `exret_126` rows
+  (usually because `scripts/fetch_prices.py` has not been run), S2
+  walk-forward skips the regressor, pickles an empty bundle, and
+  reports `mode: quality_ranker_fallback`.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `walk_forward_s1(df, board, out_dir)`: yearly S1 replay, EV-calibrated
+  threshold, Brier / precision / apply EV, pickle last fold (later
+  overwritten). Returns `{folds, summary, n_rows}`.
+- `walk_forward_s2(df, board, out_dir)`: yearly S2 regressor replay on
+  labeled 6-month returns, or the quality-ranker fallback. Hit ratio,
+  top-30% excess return, IR/CAGR proxies, mean drawdown.
+- `stop_loss_sensitivity(df, board, stop_pcts)`: listing-low vs
+  issue×(1+stop%) table for {0, −5, −10}%. Comparison only.
+- `pooled_ablation_s1(df)`: same yearly S1 loop on both boards at once.
+  Comparison only — `fit_s1(..., "pooled")` is not a live board name.
+- `_precision_at_top(y, proba, frac)`: fraction of true clean pops in
+  the top 10% by predicted probability (default).
+"""
 
 from __future__ import annotations
 

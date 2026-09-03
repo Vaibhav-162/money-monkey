@@ -1,4 +1,75 @@
-"""Close-day-only features. Listing OHLC and tracker P/L are never features."""
+"""Close-day-only features. Listing OHLC and tracker P/L are never features.
+
+WHAT THIS FILE DOES
+--------------------
+Turns a sanitized IPO row into the numbers the models actually train and
+score on — and only from fields that exist at 3:30pm on close day. Listing
+open/high/low/close and the tracker's current P/L are labels or display
+fields, never inputs here.
+
+`run_analysis.py` calls `add_features()` after load + Nifty join;
+`analysis/score.py` (`Scorer.score_row`) calls it again on a one-row frame
+so live alerts use the same math. `analysis/models.py` and
+`analysis/tuning.py` do not re-engineer features; they pull columns through
+`feature_matrix()` using `S1_FEATURE_COLS` / `S2_FEATURE_COLS`. This file
+calls `analysis.impute.impute_ratios`, then puts the *raw* ratio values back
+on the main column names so trees still see NaN.
+
+KEY TERMS USED HERE
+--------------------
+- Feature engineering / feature matrix: derived columns (`ofs_ratio`,
+  `p_allot`, dual GMP %, …) and the later rectangular `X` that
+  `feature_matrix()` builds for sklearn / LightGBM.
+- Close-day-only: every input must have been knowable when the IPO closed
+  for subscription. Using listing OHLC as a feature would be circular
+  leakage — you cannot know the first-day print before it happens.
+- GMP (Grey Market Premium): unofficial pre-listing premium in rupees.
+  Converted to `%` of issue price and of the band cap. Never imputed;
+  `gmp_missing` tells the model "no street quote" instead.
+- Subscription multiple (`sub_total_x`): times-oversubscribed. Also the
+  fallback denominator for allotment probability (`1 / sub_total_x`).
+- Allotment probability (`p_allot`): chance a retail applicant gets any
+  shares. Best estimate is retail lots ÷ applications; else 1/total-sub;
+  undersubscribed issues get 1.0.
+- OFS ratio: Offer-For-Sale crores ÷ issue size. High OFS means existing
+  owners are cashing out rather than the company raising fresh capital.
+- Issue size (crore) / `size_lt_600`: rupees raised (1 crore = 10 million)
+  and a small/mid-issue flag. Smaller books are easier for demand to swamp.
+- Lot size: shares per application lot. Used with retail quota to estimate
+  how many retail lots exist.
+- ROE / ROCE / debt-equity / PE / PBV: fundamental ratios. Main columns
+  stay raw (NaN allowed); `_filled` copies exist for logistic only.
+- PAT CAGR / `fy1_pat_margin`: two-year profit growth and latest-year
+  profit margin, from the three fiscal years on the master sheet.
+- Promoter holding pre/post: founder stake before vs after the IPO. A sharp
+  drop can mean insiders selling.
+- Peer-relative PE: this IPO's P/E minus the same-industry, same-year
+  median, as a fraction of that median — overpricing vs peers, not vs a
+  universal P/E rule.
+- Nifty 20-day (`nifty_20d`): India's benchmark index return over ~20
+  sessions before close day. Passed through if already joined; otherwise
+  left NaN (this file does not fetch prices).
+- Lock-in days: calendar days from listing to the 30- and 90-day anchor
+  unlock dates. Strategy 2 only (`S2_FEATURE_COLS`).
+- SME / liquidity risk: small SME issues with a very high GMP get
+  `liquidity_risk=1` and `ev_haircut=0.7` so expected-value math later
+  discounts erratic, illiquid listing prints.
+- Price band high / issue price: cap of the application range and the
+  final allotment price; used as GMP % denominators.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `add_features(df)`: the public builder. Imputes ratios, derives GMP %,
+  OFS, margins, CAGR, allotment odds, calendar/peer/size flags, lock-in
+  gaps, and the SME haircut. Restores raw ratios onto the main names.
+- `feature_matrix(df, cols, filled)`: slices those columns into an `X`
+  frame. `filled=True` prefers `{col}_filled` (logistic); `False` uses
+  raw/NaN (LightGBM).
+- `allotment_probability(df)`: returns `(p_allot, tier)` with the three
+  estimation paths above, so EV can multiply pop by "will I even get shares?"
+- `_cagr(later, earlier, years)` / `_num_col(df, name)`: growth math and
+  a NaN-safe numeric getter (missing column → all-NaN Series, not a scalar).
+"""
 
 from __future__ import annotations
 

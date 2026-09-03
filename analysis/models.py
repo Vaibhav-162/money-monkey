@@ -1,4 +1,90 @@
-"""Per-board LightGBM + logistic. Never fit across boards in the delivered scorer."""
+"""Per-board LightGBM + logistic. Never fit across boards in the delivered scorer.
+
+WHAT THIS FILE DOES
+--------------------
+This is the training and inference core for Strategy 1 (listing-day flip) and
+Strategy 2 (research regressor on 6-month excess return). Every `FittedBundle`
+is tagged with a single `board` (`mainboard` or `sme`); there is no pooled
+"all IPOs" path in the delivered pickle that `analysis/score.py` loads.
+
+`analysis/backtest.py` is the walk-forward caller: it `fit_s1` / `fit_s2` on
+each expanding train slice, `predict_*` on the held-out listing year, and
+`calibrate_threshold` on S1 test-fold probabilities. `run_analysis.py` then
+*re-fits* on all 2020+ rows for that board and `save_bundle`s the delivered
+`{board}_s1.pkl` / `{board}_s2.pkl`, copying the last walk-forward S1
+threshold onto the final S1 bundle. Live scoring never trains: `analysis/score.py`
+only `load_bundle`s those pickles and calls `predict_s1_proba`,
+`predict_s1_open_return`, and `predict_s2`.
+
+This file pulls rectangular `X` from `analysis.features.feature_matrix` using
+`S1_FEATURE_COLS` / `S2_FEATURE_COLS`, and asks `analysis.tuning` for a small
+inner-CV hyperparameter pick before each LightGBM fit.
+
+KEY TERMS USED HERE
+--------------------
+- Mainboard vs SME: India's two exchange tiers for IPOs. This codebase's
+  rule is never to share fitted weights across them — a mainboard model
+  must not see SME rows and vice versa (the "pooled" string in
+  `pooled_ablation_s1` is a backtest-only comparison, not a live board).
+- LightGBM: gradient-boosted decision trees. S1 uses an `LGBMClassifier`
+  for clean-pop probability plus, when enough labels exist, an
+  `LGBMRegressor` on continuous open-day return % for EV sizing. S2 uses
+  an `LGBMRegressor` on 6-month Nifty-excess return.
+- Logistic regression fallback: a StandardScaler + LogisticRegression
+  pipeline trained on *filled* features. `predict_s1_proba` uses LightGBM
+  when the bundle has one, else this logistic — so scoring still works if
+  LightGBM never fitted (too few rows / library missing).
+- Clean pop (`is_clean_pop`): the S1 classification label — a strong,
+  held first-day jump. The classifier's P(pop) is `p_pop`.
+- Open-day return (`open_return_pct`): listing open vs issue price, in
+  percent. The S1 regressor head predicts this so `score_features()` has
+  a rupee-sized E[gain], not just a probability.
+- EV / Expected Value (`realized_ev`): historical rupee profit per lot
+  after allotment odds and the liquidity haircut. `calibrate_threshold`
+  picks the S1 probability cutoff that maximizes mean EV on the rows it
+  is given (in walk-forward, that is the *test* year).
+- `exret_126`: 126-session (~6 month) return minus Nifty over the same
+  window — the S2 regression target. Live `apply_s2` does *not* use this
+  model; see `analysis/score.py`.
+- Monotonic constraints: LightGBM is told that higher `roe` / `roce` /
+  `pat_cagr` must not predict a *lower* S2 score, and higher `debt_equity`
+  / `ofs_ratio` / `peer_rel_pe` must not predict a *higher* one. Noisy
+  samples cannot reverse those real-world directions.
+- SHAP / `shap_top`: which features moved the prediction most (mean
+  |SHAP|, else LightGBM `feature_importances_`). Stored on the bundle
+  and copied into walk-forward JSON; live cards do not ship a SHAP plot.
+- Threshold selection (`calibrate_threshold`): a 0.2–0.8 grid search for
+  the cutoff that maximizes mean `realized_ev` of picked rows. Despite
+  the name this is *not* probability calibration (no Platt/isotonic, no
+  Brier here — Brier is computed in `analysis/backtest.py`).
+- Walk-forward: the outer time split lives in `backtest.py`; this file
+  just fits one slice. Tuning's inner year-out CV is nested *inside*
+  that train slice so the outer test year is never used to pick depth.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `FittedBundle`: pickleable container — board, strategy, feature list,
+  optional LightGBM classifier/regressor, optional logistic, apply
+  threshold, metrics, `shap_top`, tuned params. S1's `lgbm_reg` is the
+  open-return head used to size EV.
+- `fit_s1(train, board)`: train the S1 classifier (and open-return
+  regressor when ≥40 labeled returns exist) plus logistic. Needs ≥40
+  rows and both classes for trees; otherwise those heads stay None.
+- `fit_s2(train, board)`: train the monotone S2 excess-return regressor.
+  Returns an empty-headed bundle if LightGBM is missing or <40 labeled
+  `exret_126` rows (live S2 then falls back to the quality checklist).
+- `predict_s1_proba(bundle, df)`: P(clean pop). LightGBM first, else
+  logistic on filled features, else all-NaN.
+- `predict_s1_open_return(bundle, df)`: predicted open-day return %, or
+  None if no regressor was fit — `score.py` then uses a p_pop heuristic.
+- `predict_s2(bundle, df)`: S2 model score, or the row's `quality_score`
+  if the bundle has no LightGBM (same fallback the scorer relies on).
+- `calibrate_threshold(df, proba)`: EV-maximizing apply cutoff + fold
+  metrics. Called only from `backtest.py`, not at live-score time.
+- `save_bundle` / `load_bundle`: pickle to/from `data/analysis/models/`.
+- `_classifier_params` / `_shap_top`: class-imbalance weights for the
+  S1 classifier, and the SHAP/importance top-k helper.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,50 @@
-"""Resumable scrape pipeline: tracker index → detail pages → GMP tab → CSVs."""
+"""Resumable scrape pipeline: tracker index → detail pages → GMP tab → CSVs.
+
+WHAT THIS FILE DOES
+--------------------
+Orchestrates the historical dataset build. `scrape_ipos.py` (and
+`smoke.run_smoke`) call `run_pipeline`; they do not scrape themselves.
+Flow: `tracker.scrape_tracker` (year × mainline/SME) → `http.HttpClient`
+fetches each detail URL (disk-cached) → `parse_ipo.parse_ipo_html` →
+optional InvestorGain GMP via `gmp.scrape_gmp` → `export.flatten_into_master`
++ `append_master` into `ipos.csv` / `ipos.xlsx`. Failures go to `failed.csv`.
+
+`scripts/live_scanner.py` reuses only `scrape_one` (with `use_cache=False`
+and a shared Playwright page) — not the full year-loop. `scripts/rescrape_gmp_history.py`
+reuses `persist_gmp_history` to write shard part-files. Note: `run_pipeline`
+starts by `remove_legacy_outputs`, which deletes a leftover `gmp_history.csv`;
+the durable daily GMP archive used by `analysis/load.py` is produced by the
+rescrape script, not by this historical run.
+
+KEY TERMS USED HERE
+--------------------
+- Tracker index: the year/board list of already-listed IPOs from
+  `tracker.py`. `--ipo-id` filters that list after it is loaded.
+- Resume: skip `ipo_id`s already present in `ipos.csv` (via
+  `export.load_done_ids`). `--retry-failed` takes ids out of that skip set
+  if they appear in `failed.csv`.
+- HTML cache: detail pages stored as `{ipo_id}.html` under `out_dir/cache`
+  so a resumed run does not re-download.
+- GMP tab: InvestorGain daily grey-market history attached after parse.
+  `last_gmp_close` here is bounded by *listing date*; scoring later re-picks
+  by close date in `analysis/load.py`.
+- Mainline vs SME: the two tracker boards `run_pipeline` walks.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `scrape_index(from_year, to_year, exchanges, ipo_id)`: loop tracker pages;
+  exit if a requested `ipo_id` is not on them.
+- `scrape_one(client, row, fetch_gmp, headless, use_cache, gmp_page)`: one
+  IPO — fetch HTML, parse, optionally scrape GMP, flatten satellites onto
+  the master row. Shared by the historical loop and the live scanner.
+- `persist_gmp_history(out_dir, ipo_id, history, dest)`: replace that id's
+  block in `gmp_history.csv` (or a shard `dest`).
+- `persist_one(out_dir, master, sats)`: append/replace the master row and
+  its GMP history.
+- `log_failure(out_dir, row, error)`: append to `failed.csv`.
+- `run_pipeline(...)`: the full resumable job. Rebuilds `ipos.xlsx` every
+  50 saves and at the end; writes `coverage.txt`.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,54 @@
-"""Scrape IPO GMP history from InvestorGain (Chittorgarh GMP tab now points there)."""
+"""Scrape IPO GMP history from InvestorGain (Chittorgarh GMP tab now points there).
+
+WHAT THIS FILE DOES
+--------------------
+Chittorgarh's own GMP tab now redirects to InvestorGain, so the historical
+grey-market series is scraped from `investorgain.com/chr-gmp/{slug}/{id}`
+with Playwright (`browser.chromium_page` for one-shot, or a page the caller
+already opened). `pipeline.scrape_one` calls `scrape_gmp` /
+`scrape_gmp_with_page` and then `last_gmp_close` to stamp a single GMP onto
+the master row. `scripts/rescrape_gmp_history.py` reuses `scrape_gmp_with_page`
+across a shared `chromium_session` to rebuild `gmp_history.csv`.
+`analysis/load.py` calls `last_gmp_on_or_before` (not `last_gmp_close`) so
+scoring uses the last observation on or before *IPO close*, which avoids
+leaking listing-day GMP into a close-day prediction.
+
+KEY TERMS USED HERE
+--------------------
+- GMP (Grey Market Premium): unofficial premium, in rupees over issue price,
+  that buyers pay for IPO shares before listing. The main informal gauge of
+  listing-day demand.
+- InvestorGain: the site that now hosts the daily GMP history Chittorgarh
+  used to show. A redirect to `/report/ipo-gmp-live` means "no history" and
+  this file returns `[]`.
+- Kostak: grey-market price of an *application* (the form), not of the
+  shares themselves — a separate column from GMP.
+- Subject to sauda: another grey-market contract type on the same table;
+  must not be confused with the `Subscription` column.
+- InvestorGain `Subscription` / `sub_ig_x`: InvestorGain's own live
+  subscription multiple. It can disagree with Chittorgarh's `sub_total_x`.
+- Est. listing price: issue price + GMP, as published on the table.
+- Listing date vs close date: `last_gmp_close` historically bounded by
+  listing date (can include post-close prints). Prefer
+  `last_gmp_on_or_before(history, ipo_close)` for model features.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `investorgain_gmp_url(detail_url, ipo_id)`: map a Chittorgarh detail URL
+  to the InvestorGain `chr-gmp` page.
+- `last_gmp_on_or_before(history, as_of)`: last row with `gmp_date <= as_of`
+  (or the latest dated row if `as_of` is empty). Sorts by date — parsed
+  tables are newest-first, so `history[-1]` is the *oldest* row.
+- `last_gmp_close(history, listing_date)`: backward-compatible wrapper used
+  by the historical pipeline. Prefer `last_gmp_on_or_before` with close date.
+- `scrape_gmp(url, ipo_id, ...)`: one-shot scrape; launches its own browser.
+- `scrape_gmp_with_page(page, url, ipo_id, ...)`: same scrape on a page the
+  caller already opened (live scanner / parallel GMP rescrape).
+- `_scrape_gmp_page` / `_parse_gmp_rows` / `_looks_like_gmp_table` /
+  `_header_index` / `_subscription_header_index`: find the GMP table, map
+  columns without mixing `GMP` with `GMP DATE` or `Subscription` with
+  `Subject to Sauda`.
+"""
 
 from __future__ import annotations
 

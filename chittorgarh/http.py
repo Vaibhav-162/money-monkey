@@ -1,4 +1,38 @@
-"""HTTP session with retries, polite delay, and on-disk HTML cache."""
+"""HTTP session with retries, polite delay, and on-disk HTML cache.
+
+WHAT THIS FILE DOES
+--------------------
+This is the shared non-browser HTTP layer for Chittorgarh pages that are
+static HTML (detail pages, the current-IPO dashboard, the live subscription
+URL). `pipeline.py`, `live_dashboard.py`, `live_subscription.py`,
+`scripts/live_scanner.py`, `scripts/check_allotment.py`, and
+`scripts/verify_outcomes.py` all construct an `HttpClient`. Sibling modules
+`tracker.py`, `parse_ipo.py`, `live_dashboard.py`, and `live_subscription.py`
+also import `BASE_URL`; `browser.py` reuses `USER_AGENT` so Playwright looks
+like the same client. Nothing here launches a browser — JS-heavy pages go
+through `browser.py` instead.
+
+KEY TERMS USED HERE
+--------------------
+- Chittorgarh: the public IPO-data site (`https://www.chittorgarh.com`) this
+  project scrapes. Most URLs in the package are built from `BASE_URL`.
+- On-disk HTML cache: `get_text(..., cache_name=...)` writes the response
+  under `cache_dir` and, on a later run, returns that file instead of hitting
+  the network. `pipeline.py --resume` relies on this; live jobs pass
+  `use_cache=False` so they never score yesterday's HTML.
+- Polite delay: seconds (plus a small random jitter) slept between live
+  requests so a full historical scrape does not hammer the site.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `FetchError`: raised on HTTP 4xx/5xx so tenacity can retry the same GET.
+- `HttpClient(cache_dir, delay, timeout)`: context-managed `httpx` session
+  with Chrome-like headers. Use `with HttpClient(...) as client:`.
+- `HttpClient.get_text(url, cache_name, use_cache)`: the only fetch method.
+  Cache hit returns disk HTML; otherwise delay → GET → retry up to 3 times
+  → optionally write the cache file.
+- `HttpClient._sleep()`: enforces the polite delay; skip if `delay <= 0`.
+"""
 
 from __future__ import annotations
 

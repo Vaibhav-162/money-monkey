@@ -1,7 +1,43 @@
 """Nifty-50 5-session regime flag for Strategy 2 card copy.
 
-Network is optional. A failed Yahoo fetch returns the last cached regime
-when it is still fresh enough, otherwise NEUTRAL. Never raises.
+WHAT THIS FILE DOES
+--------------------
+Classifies the broad market as BULLISH / BEARISH / NEUTRAL from the last
+six Nifty-50 closes (latest vs five sessions earlier). Network is optional:
+a failed Yahoo fetch returns the last cached regime when it is still fresh
+enough, otherwise NEUTRAL. Never raises.
+
+The only production caller is `scripts/live_scanner.py`, which stamps
+`market_regime` onto every scored record before dispatch. `scripts/notify.py`
+does not import this module — it reads that field to pick Strategy 2 card
+copy (score 2 + BULLISH = market tailwind; score 2 + BEARISH = headwind).
+Yahoo history is borrowed from `analysis.prices._yf_history`; tests inject
+`history_fn` so they never hit the network.
+
+KEY TERMS USED HERE
+--------------------
+- Nifty / Nifty-50 (`^NSEI`): India's benchmark stock index. A 5-session
+  drop of 1.5% or more is treated as a headwind for a borderline hold.
+- Market regime: a coarse bull/bear/unclear flag for *alert wording*, not
+  a model feature. Close-day scoring uses `nifty_20d` from the price join
+  instead; this file is live-card copy only.
+- Strategy 2: the longer-hold path. Live apply/skip is the quality
+  checklist; this regime only changes the Telegram/email sentence when the
+  checklist score is exactly 2.
+- Cache freshness (`max_age_hours`, default 6): if Yahoo is down, reuse
+  `data/analysis/market_regime.json` rather than flipping the day's cards
+  to NEUTRAL on a blip. NEUTRAL itself is not written to cache.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `fetch_market_regime(cache_path, max_age_hours, history_fn)`: public
+  entry. Fetches ~21 calendar days of Nifty, classifies, caches non-NEUTRAL
+  results. On any failure, returns a fresh-enough cache or `"NEUTRAL"`.
+- `regime_from_closes(closes, threshold_pct)`: pure rule — need 6 points;
+  `(last / last-5 − 1) * 100 ≤ -1.5` → BEARISH, else BULLISH; too few
+  points → NEUTRAL.
+- `_read_cache` / `_write_cache` / `_close_col` / `_now`: JSON cache and
+  Yahoo column-name helpers. Cache I/O never raises to the caller.
 """
 
 from __future__ import annotations

@@ -1,7 +1,41 @@
 """Live category subscription from Chittorgarh's /ipo_subscription/ page.
 
+WHAT THIS FILE DOES
+--------------------
 Open-issue detail pages do not publish Total x (often empty or paywalled).
-The dedicated subscription URL is static HTML and has a 'Total Subscription' row.
+The dedicated subscription URL (`/ipo_subscription/{slug}/{id}/`) is static
+HTML and has a 'Total Subscription' row, so this uses `http.HttpClient`
+(no browser). The only production caller is `scripts/live_scanner.py`, which
+overwrites `sub_qib_x` / `sub_nii_x` / `sub_retail_x` / `sub_total_x` on the
+master row after `pipeline.scrape_one`. Parser tests live in
+`tests/test_live_dashboard.py`. Historical scrapes do *not* call this —
+they keep the (possibly paywalled) numbers from `parse_ipo.py`.
+
+KEY TERMS USED HERE
+--------------------
+- Subscription multiple (`sub_*_x`): how many times the reserved shares in
+  that category were applied for. `2.78` means 2.78× retail demand.
+- Total x: the all-categories multiple. This is the number the live scanner
+  wants on close day; the detail page often hides it behind an IPOMatrix
+  paywall while this dedicated page still shows it.
+- QIB / NII / retail: Qualified Institutional Buyers, Non-Institutional
+  Investors, and retail individuals — the three category rows this parser
+  keeps. bNII/sNII splits are ignored here.
+- Day-wise table: a history table headed `Date | … | Subscription (times)`.
+  It must be skipped; otherwise the first `Total` row would win and we
+  would store a stale daily print instead of the live category snapshot.
+- Slug / `ipo_id`: the same Chittorgarh URL pieces as the detail page.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `subscription_url(slug, ipo_id)`: builds the dedicated subscription URL.
+- `parse_subscription_html(html)`: picks the table with the most filled
+  category fields; returns Nones if none look like a live category table.
+- `fetch_live_subscription(client, slug, ipo_id)`: GET with `use_cache=False`
+  (live numbers change through the day) then parse.
+- `_parse_subscription_table(rows)`: one table → category dict, or None if
+  it is a day-wise Date table or has no usable numbers.
+- `_cell_text(cell)`: strip scripts/whitespace from a cell.
 """
 
 from __future__ import annotations

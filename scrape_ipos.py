@@ -1,4 +1,39 @@
-"""CLI for the Chittorgarh IPO historical dataset scraper."""
+"""CLI for the Chittorgarh IPO historical dataset scraper.
+
+WHAT THIS FILE DOES
+--------------------
+Repo-root entrypoint for the `chittorgarh` package. It only parses flags and
+delegates: `--smoke` → `smoke.run_smoke`, `--rebuild-xlsx` →
+`export.rebuild_master_xlsx`, otherwise `pipeline.run_pipeline`. Nothing else
+in the codebase imports this module; humans (and the README) run
+`python scrape_ipos.py ...`. Live daily alerts and allotment checks are
+separate CLIs (`scripts/live_scanner.py`, `scripts/check_allotment.py`).
+
+KEY TERMS USED HERE
+--------------------
+- Mainline / SME: the two Chittorgarh tracker boards (`--exchange`).
+  `mainline` is the primary NSE/BSE tier (stored as `mainboard` downstream);
+  SME is the small-and-medium segment. Default is both.
+- GMP: Grey Market Premium history from InvestorGain, fetched unless
+  `--no-gmp`. Skip it only for faster parser debugging.
+- Resume: `--resume` skips `ipo_id`s already in `ipos.csv`. Combine with
+  `--retry-failed` to redo rows listed in `failed.csv`.
+- Smoke: live end-to-end check of one known IPO (Lohia Corp, id 2574).
+  Uses a temp folder; this CLI also deletes a leftover `data/smoke/` from
+  older versions so it cannot be mistaken for the real dataset.
+- `--headed`: show the Chromium window (tracker + GMP). Default is headless.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `build_parser()`: argparse for year range, `--year`, `--exchange`,
+  `--ipo-id` (filter after that year's tracker loads), `--out`, `--delay`,
+  `--resume`, `--retry-failed`, `--no-gmp`, `--headed`, `--smoke`,
+  `--rebuild-xlsx`.
+- `_remove_stale_smoke_folder()`: delete `data/smoke/` (and empty `data/`)
+  so an old smoke dump cannot mix with a real scrape.
+- `main(argv)`: dispatch to smoke, xlsx rebuild, or the full pipeline.
+  `--year` overrides `--from-year` / `--to-year`. Return code 0/1.
+"""
 
 from __future__ import annotations
 

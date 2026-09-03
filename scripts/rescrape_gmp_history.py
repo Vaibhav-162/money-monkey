@@ -7,6 +7,63 @@ Run this yourself. The agent does not execute it.
 
 Workers write data/gmp_parts/shard_XX.csv, then the parent merges into
 data/gmp_history.csv (many rows per ipo_id). Does not rewrite ipos.csv.
+
+WHAT THIS FILE DOES
+--------------------
+Historical Strategy 1 training needs a leak-free Grey Market Premium: the
+GMP that was known on each IPO's close date, not the listing-day print.
+InvestorGain keeps a daily GMP archive; this script walks `data/ipos.csv`
+(2020+ by default), opens each archive in Playwright, and writes many
+dated rows per `ipo_id` into `data/gmp_history.csv`. After a successful
+run you re-run `python run_analysis.py --out data` so the trainer can
+use `gmp_at_close` instead of a leaky listing-date anchor.
+
+This is a **manual, local** network job. There is no GitHub Actions
+workflow for it — README and `run_analysis.py`'s summary note are the
+only in-repo callers, and they only mention the CLI. Parallelism is
+`--workers N`: the parent re-invokes this same script with `--shard` /
+`--shards` via `chittorgarh.shards.launch_worker_processes`, each worker
+writes `data/gmp_parts/shard_XX.csv`, then the parent (or a later
+`--merge`) folds shards into `gmp_history.csv` by `ipo_id` and deletes
+the parts. Failures land in `gmp_failed.csv`. `--resume` skips ids
+already present in the history file or leftover shards.
+
+It calls `chittorgarh.gmp.scrape_gmp_with_page`,
+`chittorgarh.pipeline.persist_gmp_history`, `chittorgarh.export`
+(`read_master`, `append_or_replace`), and `chittorgarh.browser.chromium_session`.
+It never rewrites `ipos.csv`.
+
+KEY TERMS USED HERE
+--------------------
+- GMP (Grey Market Premium): the unofficial rupee premium over issue
+  price that grey-market buyers pay before listing. One archive row per
+  calendar day; the trainer later picks the close-date value so the
+  live scanner's "today's GMP" feature is not trained on future data.
+- InvestorGain: the site that actually hosts the daily GMP table
+  (Chittorgarh's GMP tab now redirects there). Scraped with Playwright
+  because the archive is not static HTML.
+- `ipo_id` / listing year: master-sheet identity and the year filter
+  (`--from-year` / `--to-year`, default 2020–2026). Only listed rows
+  in `ipos.csv` are walked.
+- Shard / worker: one parallel Chromium process writing its own CSV
+  so a 4-way run can finish the archive without one long serial scrape.
+  `--resume` plus `--merge` exist because a worker can die mid-run.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `main(argv)`: CLI. `--merge` only folds parts and exits. `--workers N`
+  (parent) launches N children then merges. A child (`--shard`) or a
+  serial run scrapes its slice.
+- `run_shard(work, dest, failed_dest, delay, headed, tag)`: one
+  Chromium session, one new Page per IPO, persist history or mark
+  empty/failed. Sleeps `delay` seconds between names (be polite).
+- `merge_gmp_parts(out_dir)`: replace-by-`ipo_id` merge of shard CSVs
+  into `gmp_history.csv` (and failed shards into `gmp_failed.csv`),
+  then delete the parts directory if empty.
+- `_work_frame` / `_remaining_rows` / `_resume_ids`: choose which
+  master-sheet rows still need a scrape.
+- `_parts_dir` / `_shard_csv` / `_failed_csv`: path helpers for the
+  shard layout described above.
 """
 
 from __future__ import annotations

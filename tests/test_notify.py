@@ -3,11 +3,15 @@ import smtplib
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from scripts.notify import (
+    NotificationDeliveryError,
     _app_password,
     _checklist_lines,
     _env,
     _redact,
+    _split_recipients,
     dispatch,
     format_allotment_card,
     format_allotment_result_email,
@@ -434,6 +438,48 @@ def test_dispatch_one_email_even_on_auth_failure(monkeypatch) -> None:
     assert len(email_subjects) == 1
 
 
+def test_dispatch_raises_when_telegram_and_email_both_fail(monkeypatch) -> None:
+    # Regression: a dead Gmail app password + a broken Telegram token used to
+    # be swallowed silently (print-only), so the Actions run reported a
+    # false-green "success" while zero real alerts got delivered for days.
+    def telegram_boom(text, **kw):
+        raise RuntimeError("telegram down")
+
+    def email_boom(subject, body, **kw):
+        raise smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+
+    monkeypatch.setattr("scripts.notify.send_telegram", telegram_boom)
+    monkeypatch.setattr("scripts.notify.send_email", email_boom)
+    with pytest.raises(NotificationDeliveryError):
+        dispatch([_record(company_name="A"), _record(company_name="B")], dry_run=False)
+
+
+def test_dispatch_does_not_raise_when_telegram_succeeds_but_email_fails(monkeypatch) -> None:
+    # Partial delivery (at least one channel got through) must stay a
+    # logged-only issue, not a hard failure -- the alert still reached you.
+    monkeypatch.setattr("scripts.notify.send_telegram", lambda text, **kw: True)
+
+    def email_boom(subject, body, **kw):
+        raise smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+
+    monkeypatch.setattr("scripts.notify.send_email", email_boom)
+    sent = dispatch([_record(company_name="A")], dry_run=False)
+    assert sent == 1
+
+
+def test_dispatch_does_not_raise_when_both_channels_are_simply_unconfigured(monkeypatch) -> None:
+    # No secrets set at all (e.g. a local dev run) is an intentional silent
+    # skip, not an error -- send_telegram/send_email return False, they
+    # never raise, so this must stay a clean no-op like before.
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.delenv("GMAIL_USER", raising=False)
+    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
+    monkeypatch.delenv("GMAIL_PASS", raising=False)
+    sent = dispatch([_record(company_name="A")], dry_run=False)
+    assert sent == 0
+
+
 def test_send_failure_alert_dedupes_within_same_ist_day(tmp_path, monkeypatch) -> None:
     telegrams: list[str] = []
     emails: list[tuple[str, str]] = []
@@ -470,3 +516,18 @@ def test_send_failure_alert_sends_again_on_new_ist_day(tmp_path, monkeypatch) ->
     send_failure_alert("boom", state_path=state)
     assert len(telegrams) == 1
     assert len(emails) == 1
+
+
+def test_split_recipients_skips_malformed_addresses(capsys) -> None:
+    out = _split_recipients("good@x.com, not-an-email, , another@x.com")
+    assert out == ["good@x.com", "another@x.com"]
+    captured = capsys.readouterr()
+    assert "not-an-email" in captured.out
+
+
+def test_send_email_skips_malformed_alert_email_to(monkeypatch) -> None:
+    captured = _patch_smtp(monkeypatch)
+    _gmail_secrets(monkeypatch)
+    monkeypatch.setenv("ALERT_EMAIL_TO", "good@x.com, bad-address, also@x.com")
+    assert send_email("IPO alert", "<p>hi</p>") is True
+    assert captured["to"] == ["good@x.com", "also@x.com"]

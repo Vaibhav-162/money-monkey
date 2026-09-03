@@ -1,4 +1,61 @@
-"""Load the master sheet, sanitize, exclude non-operating IPOs, join GMP history and prices."""
+"""Load the master sheet, sanitize, exclude non-operating IPOs, join GMP history and prices.
+
+WHAT THIS FILE DOES
+--------------------
+This is the first step of the local analysis pipeline: turn the scraped master
+CSV into a typed modeling frame. `run_analysis.py` calls `load_dataset()` and
+then hands the result to `load_nifty_20d` / `add_features` / `add_targets`.
+`analysis/prices.py` and `scripts/fetch_prices.py` reuse `sanitize()` so price
+jobs see the same cleaned types. This file reads `chittorgarh.export.read_master`
+and, for leak-free GMP, `chittorgarh.gmp.last_gmp_on_or_before`.
+
+`attach_prices()` only merges `ret_*` / `exret_*` / `mdd_*` / `sharpe_*` from
+`prices/returns.csv`. The Nifty 20-day feature is *not* joined here —
+`run_analysis.py` calls `analysis.prices.load_nifty_20d` separately for that.
+
+KEY TERMS USED HERE
+--------------------
+- IPO: a company's first sale of shares to the public. The master sheet also
+  contains non-operating rows (follow-on issues, REIT/InvIT trusts, malformed
+  "IPO information" titles) that this file excludes rather than scores.
+- FPO / REIT / InvIT: follow-on public offer, real-estate trust, and
+  infrastructure trust. They are not ordinary equity IPOs; `exclusion_reason`
+  drops them into the excluded frame.
+- GMP (Grey Market Premium): unofficial pre-listing premium, in rupees over
+  issue price. `gmp_rs` on the master sheet is often a listing-day snapshot;
+  `gmp_at_close` prefers the last history row dated on or before `ipo_close`.
+- Data leakage: using a number that would not have been known at decision
+  time. A listing-anchored GMP can peek past close day, so fallbacks are
+  tagged `gmp_anchor=listing_date_leaky` instead of silently mixed in.
+- Price band / issue price: the announced low–high application range and the
+  final price at which shares are allotted. `flag_outliers` marks rows where
+  issue price sits outside the band.
+- Subscription multiple (`sub_total_x`): how many times the offer was bid
+  for. Values above 1000x are flagged, not dropped.
+- OFS (Offer For Sale): existing shareholders selling stock (vs a fresh
+  issue of new shares). Parsed as `ofs_cr` / `ofs_shares` here; later files
+  turn that into `ofs_ratio`.
+- Issue size (crore): rupees raised, where 1 crore = 10 million. Stored as
+  `issue_size_cr` and related share counts.
+- Allotment date: when the registrar says who got shares. Parsed as a date
+  only; probability math lives in `analysis/features.py`.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `load_dataset(out_dir)`: pipeline entry. Reads `ipos.csv`, sanitizes,
+  splits excluded rows, flags outliers, attaches GMP-at-close and post-listing
+  returns. Returns `(modeling_frame, excluded_rows)`.
+- `sanitize(df)`: strips currency/percent junk, maps "None"/"NaN" text to
+  real missing values, and parses the numeric and date columns models need.
+- `attach_gmp_at_close(df, gmp_history_path)`: leak-safe GMP join. History
+  date ≤ `ipo_close` wins; otherwise copies `gmp_rs` and marks it leaky.
+- `attach_prices(df, prices_dir)`: left-joins horizon returns from
+  `prices/returns.csv` (not Nifty). Missing file is a no-op.
+- `exclusion_reason(name)` / `flag_outliers(df)`: name-based drop vs
+  keep-and-flag. Outliers stay in the sample so tail cases are not hidden.
+- `empty_mask(s)`, `to_numeric(s)`, `_history_records(...)`: private
+  cleaning helpers used by sanitize and the GMP join.
+"""
 
 from __future__ import annotations
 

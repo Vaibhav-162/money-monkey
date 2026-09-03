@@ -1,4 +1,59 @@
-"""Per-board EDA: correlations, VIF, distributions, cohorts."""
+"""Per-board EDA: correlations, VIF, distributions, cohorts.
+
+WHAT THIS FILE DOES
+--------------------
+Descriptive statistics *before* modeling: how listing-day gain lines up
+with close-day features, whether those features are collinear, and how
+pops cluster by subscription and issue-size buckets. No model is fit
+here and nothing is written to disk — `run_analysis.py` is the only
+caller (`board_eda` once per `mainboard` and `sme`) and it dumps the
+dict to `data/analysis/eda.json` via `analysis.report.dump_json`.
+
+This file does not import the rest of the analysis package. It expects
+`exchange_type` plus the feature/label columns that `add_features` /
+`add_targets` already put on the frame.
+
+KEY TERMS USED HERE
+--------------------
+- EDA (Exploratory Data Analysis): look at the data before trusting a
+  model — correlations, shape of the gain distribution, missing GMP.
+- Mainboard vs SME: `board_eda` slices on `exchange_type`. Mixing boards
+  in one table would hide that SME pops and mainboard pops are different
+  animals.
+- Listing-day gain (`listing_day_gain_pct`): first-day % vs issue price.
+  Used here as a descriptive target (Pearson/Spearman, discount vs
+  premium rate), not as a model feature.
+- Clean pop (`is_clean_pop`): in subscription-tier cohorts, the fraction
+  of names that had a strong, held first-day jump.
+- Subscription multiple (`sub_total_x`): times-oversubscribed. Cut into
+  ≤1x / 1–5x / 5–20x / 20–50x / >50x to see whether hotter books listed
+  better.
+- Issue size (`issue_size_cr`): rupees raised in crore (1 crore = 10
+  million). Size cohorts ask whether tiny books behave differently.
+- GMP % vs issue / `gmp_at_close` / `gmp_anchor`: unofficial pre-listing
+  premium as a % of issue price, and how that quote was dated. `gmp_fill_2020`
+  is the fraction of 2020+ rows with a close-day GMP; `gmp_anchor_counts`
+  flags listing-date-leaky vs ipo_close vs none.
+- OFS ratio: fraction of the issue that is existing holders selling.
+- ROE / ROCE / debt-equity / PE (`pe_pre`): profitability, leverage, and
+  pre-issue valuation — the same fundamentals the models see.
+- Allotment probability (`p_allot`) / promoter pre %: chance of getting
+  shares, and founder stake before the IPO.
+- Pearson / Spearman: linear vs rank correlation of each feature with
+  listing gain. Spearman is more robust to a few insane GMP outliers.
+- VIF (Variance Inflation Factor): how much a column is a linear combo
+  of the others. High VIF means "this number is redundant"; it does not
+  by itself drop a feature from LightGBM.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `board_eda(df, board)`: the whole report for one exchange tier —
+  correlations, VIF, gain distribution (mean/median/skew/VaR-5/p95),
+  discount vs premium rate, subscription and size cohorts, GMP coverage.
+- `_vif(frame)`: per-column VIF via least squares; empty if too few
+  complete rows. Caps a near-perfect collinear column at 999.
+- `EDA_COLS`: the feature list actually correlated and VIFed.
+"""
 
 from __future__ import annotations
 

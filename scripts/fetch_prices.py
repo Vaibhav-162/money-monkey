@@ -11,6 +11,56 @@ Spot-check tries 10 mainboard + 10 SME tickers through:
 
 Workers fetch missing data/prices/daily/{ipo_id}.parquet files. The parent
 (or --merge) then builds data/prices/returns.csv locally from those parquets.
+
+WHAT THIS FILE DOES
+--------------------
+Strategy 2 (quality / hold) is trained on what the stock actually did
+after listing — especially ~6-month excess returns vs Nifty. Those
+series do not come from Chittorgarh; this script is the only network
+entry that downloads them. `analysis/prices.py` owns the Yahoo /
+jugaad-data helpers and the returns join; this file is the CLI +
+worker orchestration around those helpers (`listed_price_jobs`,
+`missing_daily_ids`, `fetch_daily_bars`, `fetch_nifty`, `spot_check`,
+`build_returns_table`).
+
+This is a **manual, local** job. There is no GitHub Actions workflow.
+README tells you to `--spot-check` first, then `--workers 4`;
+`run_analysis.py` notes that until this has been run, Strategy 2
+falls back to the quality-ranker (no price model). After a fetch,
+re-run `python run_analysis.py --out data`.
+
+`--workers N` re-invokes this same script via
+`chittorgarh.shards.launch_worker_processes` so each child fills
+missing `data/prices/daily/{ipo_id}.parquet` files. The parent (or a
+later `--merge`) builds `data/prices/returns.csv` locally from those
+parquets and also fetches Nifty (`^NSEI`) once. `--spot-check` writes
+`data/prices/spot_check.json` and warns if the SME hit-rate is too
+low to trust an SME price backtest.
+
+KEY TERMS USED HERE
+--------------------
+- Strategy 2: the "is this worth holding past listing day?" decision.
+  Needs post-listing daily bars plus Nifty so the trainer can compute
+  excess returns; without this script it uses a fundamentals-only
+  quality ranker.
+- Mainboard vs SME: NSE/BSE listed issues vs the smaller SME boards.
+  Yahoo coverage of SME tickers is patchy; the spot-check's per-board
+  hit-rate tells you whether an SME S2 price backtest is honest.
+- Nifty: the Nifty-50 index (`^NSEI`), fetched once per parent/serial
+  run into `data/prices/nifty.parquet` so stock returns can be compared
+  to the market over the same window.
+- Daily parquet / `returns.csv`: one `{ipo_id}.parquet` of OHLCV bars
+  per listed IPO; the merge step rolls those into the wide returns
+  table `run_analysis.py` reads.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `main(argv)`: CLI. `--spot-check` and `--merge` exit early.
+  `--workers N` (parent) fetches Nifty, launches children, then writes
+  returns. A child (`--shard`) only fills its slice of missing parquets.
+- `_jobs(out_dir)`: listed rows from `ipos.csv` that have a listing date.
+- `_write_returns(out_dir)`: rebuild `data/prices/returns.csv` from the
+  daily parquet cache (no network).
 """
 
 from __future__ import annotations

@@ -1,4 +1,68 @@
-"""Post-listing price join. Network calls live only in scripts/fetch_prices.py."""
+"""Post-listing price join. Network calls live only in scripts/fetch_prices.py.
+
+WHAT THIS FILE DOES
+--------------------
+Builds the post-listing daily bars and horizon-return table that Strategy 2
+needs — the master sheet has no "price six months later" field. The intended
+CLI is `scripts/fetch_prices.py`, which calls `spot_check`, `fetch_nifty`,
+`listed_price_jobs`, `missing_daily_ids`, `fetch_daily_bars`, and
+`build_returns_table` (workers write `prices/daily/{ipo_id}.parquet`; the
+parent rebuilds `returns.csv` locally). `run_analysis.py` only calls
+`load_nifty_20d()` to stamp the close-day Nifty feature onto the modeling
+frame. `analysis/market_regime.py` imports `_yf_history` for its own Yahoo
+pull. This file uses `analysis.load.sanitize` and
+`chittorgarh.export.read_master` to list jobs.
+
+`analysis/load.attach_prices` merges `ret_*` / `exret_*` / `mdd_*` /
+`sharpe_*` but *not* `nifty_20d` — that is why the Nifty join is a separate
+function here. `fetch_all_returns()` is a sequential convenience wrapper;
+no other module calls it (the CLI uses the pieces above).
+
+KEY TERMS USED HERE
+--------------------
+- Mainboard vs SME: exchange tiers. Spot-check samples each board separately
+  because SME tickers are often missing from Yahoo and NSE-direct.
+- Nifty (`^NSEI`): India's benchmark index. Used as the excess-return
+  benchmark (`exret_*` = stock return minus Nifty over the same sessions)
+  and as the 20-session close-day momentum feature (`nifty_20d`).
+- `nifty_20d`: percent change in Nifty from 21 sessions back to the last
+  close on or before `as_of` (IPO close, else listing date). Leakage-safe:
+  it does not peek past decision time.
+- Session return (`ret_21/63/126/252`): close-to-close return from the
+  first session on or after listing through N trading sessions (~1/3/6/12
+  months). `exret_*` subtracts Nifty over the same window.
+- Max drawdown (`mdd_126`): worst peak-to-trough drop in the first 126
+  sessions after listing. A risk statistic, not a training feature.
+- Sharpe (`sharpe_126`): annualized mean/std of daily returns over that
+  window (252-day convention). Same: research/backtest, not a close-day
+  feature.
+- Listing date: first official trading day. All horizons start here, not
+  at IPO close.
+- Data leakage: `nifty_20d_asof` cuts the index series at `as_of`. Using
+  post-listing stock prices as *features* would leak; they are targets
+  and diagnostics only.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `resolve_history(nse_symbol, bse_code, start, end)`: Yahoo `{nse}.NS`,
+  then `{bse}.BO`, then jugaad-data NSE (EQ, then SM). Returns `(frame, src)`.
+- `fetch_nifty(prices_dir)` / `fetch_daily_bars(jobs, daily_dir, ...)`:
+  network + parquet cache. Daily fetch does not write `returns.csv`.
+- `build_returns_table(out_dir)`: local walk of daily parquets +
+  `nifty.parquet` → the returns frame the CLI saves as `returns.csv`.
+- `load_nifty_20d(df, prices_dir)`: maps `nifty_20d` from `returns.csv`
+  onto the IPO frame by `ipo_id`.
+- `nifty_20d_asof(nifty, as_of)` / `nifty_return(...)`: index math used
+  when building each IPO's return record.
+- `listed_price_jobs(df)` / `missing_daily_ids(daily_dir, jobs)` /
+  `spot_check(out_dir, n_each)`: job list, cache gaps, and a 10+10 ticker
+  hit-rate probe.
+- `fetch_all_returns(out_dir, ...)`: nifty + daily bars + table in one
+  serial call. Unused by the CLI.
+- `_yf_history` / `_jugaad_history` / `_close_col` / `_session_return` /
+  `_mdd` / `_sharpe` / `_returns_record`: vendor adapters and per-horizon
+  helpers. `_yf_history` is also the Yahoo hook for market-regime.
+"""
 
 from __future__ import annotations
 

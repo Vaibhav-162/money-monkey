@@ -1,14 +1,58 @@
 """Current-IPO dashboard: who is open, and who closes on a given IST day.
 
-Chittorgarh's mainboard (`/ipo/`) and SME (`/ipo/ipo_dashboard.asp?a=sme`)
-dashboards render the 'Company / Issue Date' table as static HTML. Each data
-row is one cell:
+WHAT THIS FILE DOES
+--------------------
+Discovers *currently listed on the dashboard* IPOs (open, upcoming, pending
+list, recently closed) — not the historical "already listed" index in
+`tracker.py`. Chittorgarh's mainboard (`/ipo/`) and SME
+(`/ipo/ipo_dashboard.asp?a=sme`) dashboards render the 'Company / Issue Date'
+table as static HTML, so this uses `http.HttpClient` (never Playwright).
+`scripts/live_scanner.py` calls `scrape_all_open_ipos` + `closing_on` +
+`today_ist` to decide which issues to score today. `scripts/check_allotment.py`
+only imports `today_ist` for the IST calendar day. `tests/test_live_dashboard.py`
+covers the parser. Runnable as `python -m chittorgarh.live_dashboard`.
+
+Each data row is one cell:
 
     <a href="/ipo/{slug}/{id}/">{name}</a>
     <span class="badge" title="Open">O</span>   <!-- optional; P = pending list -->
     <span class="float-end">28 Aug - 01 Sep</span>
 
 Date text has no year. Year is inferred from `as_of` (default: today IST).
+
+KEY TERMS USED HERE
+--------------------
+- Mainboard vs SME: two dashboard URLs. Mainboard (also accepted as
+  `mainline`) is the primary NSE/BSE tier; SME is the small-and-medium
+  exchange segment with its own listing rules.
+- IST: Indian Standard Time (`Asia/Kolkata`). Bidding windows and "closes
+  today" are calendar dates in IST, not the machine's local timezone.
+- Issue / bidding window: the `open_date`–`close_date` span when investors
+  can apply. Live alerts fire on close day (`closing_on`).
+- Status badge: `O` = open for bidding, `P` = pending list (applied, not
+  yet listed). If the badge is missing, status is derived from dates vs
+  `as_of` (upcoming / open / closed).
+- `ipo_id` / slug: Chittorgarh URL pieces reused by `pipeline.scrape_one`
+  and `live_subscription.fetch_live_subscription`.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `today_ist(now)`: today's date in IST (or the date of a supplied stamp).
+- `dashboard_url(exchange)`: mainboard or SME dashboard URL.
+- `parse_issue_dates(text, as_of)`: parses spans like `01 - 03 Sep` or
+  `31 Aug - 02 Sep` and attaches the year closest to `as_of`.
+- `parse_dashboard_html(html, exchange_type, as_of)`: table → list of row
+  dicts. Never raises on a bad row; logs and skips.
+- `closing_on(rows, as_of)`: rows whose `close_date` equals that IST day —
+  the live scanner's default candidate set.
+- `scrape_open_ipos(exchange, client, as_of, html)`: fetch one board (or
+  parse supplied HTML in tests). Always `use_cache=False`.
+- `scrape_all_open_ipos(client, as_of)`: mainboard + SME in one call.
+- Date helpers (`_month_num`, `_date_with_year`, `_closest_date`) and row
+  helpers (`_parse_href`, `_issue_date_table`, `_status_from_row`): year
+  inference and badge/date status.
+- `main(argv)` / `_print_table(rows)`: dry-run CLI to print open-now and
+  closing-today tables.
 """
 
 from __future__ import annotations

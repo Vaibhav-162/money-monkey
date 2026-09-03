@@ -1,4 +1,63 @@
-"""Fill realized listing-day outcomes on unverified audit rows."""
+"""Fill realized listing-day outcomes on unverified audit rows.
+
+WHAT THIS FILE DOES
+--------------------
+The close-day scanner writes a *prediction* (`apply_s1`, `p_pop`,
+`ev_retail`, …) into `data/live_audit_log.csv` before the stock lists.
+This script is the next-morning check: re-fetch each unverified row's
+Chittorgarh detail URL, and once listing OHLC is on the page, fill
+`actual_listing_open`, `actual_open_return_pct`, and
+`actual_is_clean_pop`, then flip `verified`. Already-verified rows are
+left untouched (idempotent).
+
+`.github/workflows/verify_outcomes.yml` is the production entrypoint.
+It runs `python scripts/verify_outcomes.py --out data` on a weekday
+`schedule` at 09:45 IST (`15 4 * * 1-5`) and on `workflow_dispatch`
+(no dry-run flag — this job does not send alerts). The workflow then
+commits the updated audit CSV plus `data/analysis/live_performance.json`.
+Nothing else in the package imports `run_verify()` except tests.
+
+This file calls `chittorgarh.http.HttpClient` + `parse_ipo_html` +
+`flatten_into_master` for the live re-fetch, and
+`analysis.live_audit.compute_actuals` / `performance_summary` /
+`read_audit` / `write_audit` for the outcome math and the CSV/JSON
+write. It does not talk to Telegram or Gmail.
+
+`compute_actuals` returns None until listing open is published, so a
+row stays unverified and will be tried again the next weekday. A clean
+pop is defined from the **listing OPEN** return (>= 15% and the day's
+low held above issue price), matching the EV framework's "exit at
+listing open" assumption — not the historical close-day tracker gain,
+which a bare detail-URL re-fetch never has.
+
+KEY TERMS USED HERE
+--------------------
+- Listing-day outcome / clean pop: whether the stock opened at least
+  15% above issue price without trading below it that morning. This is
+  the realized label that Strategy 1 (`apply_s1`) was predicting.
+- Verified flag: `verified=True` plus `verified_at` means listing OHLC
+  was found and actuals were written. The next run skips that row.
+  If OHLC is still missing, the row stays unverified for tomorrow.
+- Audit log (`data/live_audit_log.csv`): the forward-test ledger the
+  close-day scanner and allotment checker also write. This script only
+  fills the actuals / verified columns; it does not re-score or re-alert.
+- Board (`exchange_type`): passed through to `parse_ipo_html` so
+  mainboard vs SME detail pages parse with the right layout.
+- `live_performance.json`: aggregate precision / realized-EV snapshot
+  over verified APPLY-S1 rows, rewritten every run (even when the audit
+  is empty) so the committed JSON cannot go stale.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `run_verify(...)`: walk the audit, verify unverified rows, write the
+  CSV and the performance JSON. Accepts injected `rows` / `client` for
+  tests.
+- `verify_row(client, row)`: fetch one detail page and merge actuals.
+  Returns the row unchanged when listing OHLC is not published yet.
+- `_verified_flag(value)` / `_write_summary(out_dir, summary)`: audit-CSV
+  bool parse, and the JSON dump to `data/analysis/live_performance.json`.
+- `main(argv)`: CLI (`--out`, default `data`).
+"""
 
 from __future__ import annotations
 

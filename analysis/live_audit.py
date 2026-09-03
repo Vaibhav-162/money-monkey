@@ -1,4 +1,107 @@
-"""Forward-test ledger for close-day alerts (`data/live_audit_log.csv`)."""
+"""Forward-test ledger for close-day alerts (`data/live_audit_log.csv`).
+
+WHAT THIS FILE DOES
+--------------------
+This is the shared schema and I/O for the live paper-trade log — one row
+per `(ipo_id, close_date)`. It does not scrape, train, or send Telegram;
+three scripts own those jobs and all three talk to the same CSV:
+
+- `scripts/live_scanner.py` (close-day 15:30 path): `to_score_row` →
+  `score_features`, `build_alert_record`, `scrape_timestamps`,
+  `rank_same_day_candidates`, `read_audit` + `records_needing_alert`
+  (the presence-only gate), then `dispatch()` **before** `upsert_audit()`.
+  If delivery raises, the row must stay absent so a retry can still alert.
+- `scripts/verify_outcomes.py` (next-morning listing check): `read_audit`,
+  `compute_actuals`, `write_audit`, `performance_summary`.
+- `scripts/check_allotment.py` (allotment-out notify): `AUDIT_COLUMNS`,
+  `read_audit`, `write_audit` — it sets `allotment_notified` only after
+  a successful send, same "don't persist a failed attempt" idea.
+
+`upsert_audit` refreshes scores for *all* of today's scored IPOs but
+preserves `verified*` and `allotment_notified*` if a later tick re-writes
+the same key. Dry-run in the scanner must not call `upsert_audit`: the
+gate treats any existing key as "already alerted", so a test write would
+suppress the real 15:30/16:00 card.
+
+KEY TERMS USED HERE
+--------------------
+- Presence-only gate: `records_needing_alert` keeps a record only when
+  no `(ipo_id, close_date)` row exists yet. It does **not** compare GMP,
+  subscription, or apply flags — the first real write of the day is the
+  one alert; later ticks stay silent even if numbers moved. A bug that
+  writes the row *before* a successful send permanently suppresses that
+  IPO for the rest of the day (a credentials fix cannot re-alert).
+- Audit log (`data/live_audit_log.csv`): the forward-test ledger. Close-
+  day predictions live here before the stock lists; verify fills actuals;
+  allotment-check flips `allotment_notified`.
+- ipo_id / close_date: Chittorgarh id and last bidding day. Together they
+  are the unique key for upsert and the gate.
+- GMP (`gmp_rs` / `gmp_pct`): unofficial pre-listing premium in rupees
+  over issue price. Live scrape uses `gmp_rs`; `to_score_row` copies it
+  onto `gmp_at_close` so the trainer's feature name is filled.
+- Subscription (`sub_total_x`, `sub_ig_x`, `sub_qib_x`): times-
+  oversubscribed from Chittorgarh, InvestorGain (display), and QIB.
+  QIB is the tie-breaker for same-day APPLY ranking, not a model feature.
+- QIB: Qualified Institutional Buyer book. Used only as the second sort
+  key in `rank_same_day_candidates`.
+- Price band high / issue price / lot size: cap of the application
+  range, allotment price, and shares per lot. Capital at risk is
+  `price_band_high * lot_size` (issue price if the band cap is missing).
+- apply_s1 / apply_s2 / EV (`ev_retail`): the two strategy decisions and
+  the rupee ranking number from `score_features`. Ranking never changes
+  those flags.
+- EV/capital ratio: `ev_retail / capital_required`. Same-day APPLY-S1
+  names are ranked by this, then QIB. A lone applicant is left unranked
+  (no "1 of 1" banner). Missing ratio or QIB sorts as worst, not as zero.
+- Quality score / breakdown: the 0–4 checklist and per-item JSON stored
+  for the card; `apply_s2` is the live hold/skip from that checklist.
+- Market regime: `BULLISH`/`BEARISH`/`NEUTRAL` column on the CSV.
+  Stamped by `live_scanner` (Nifty helper), not computed here — this
+  file only stores it.
+- Allotment date / `allotment_notified`: registrar timetable and "we
+  already sent the allotment-out ping". Upsert must not clear a True.
+- Clean pop actuals: `actual_listing_open`, `actual_open_return_pct`,
+  `actual_is_clean_pop`. A clean pop is open-return ≥ 15% *and* the
+  day's low held above issue — matching the EV "exit at listing open"
+  assumption, not the historical tracker gain (a live re-fetch of the
+  bare detail URL never has a `tracker` dict, so that field would stay
+  None forever).
+- Verified: listing OHLC was found and actuals written. `upsert_audit`
+  keeps prior verified fields when the same key is re-scored.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `AUDIT_COLUMNS`: canonical CSV header. `read_audit` fills missing
+  columns so an older file still loads.
+- `scrape_timestamps(now)`: UTC ISO + locale-stable IST stamp
+  (`DD-Mon HH:MM IST`) for cards and the log.
+- `to_score_row(master, close_date)`: map a live scrape onto
+  `score_features()` inputs (GMP name + `listing_year` fallback). S1/S2
+  schema unchanged.
+- `build_alert_record(master, score, discovery, error)`: one audit-shaped
+  dict. Scrape/score failures set `error` and leave score fields empty
+  so a card cannot pretend the model decided.
+- `read_audit` / `write_audit`: CSV round-trip as strings; write always
+  emits `AUDIT_COLUMNS` order.
+- `upsert_audit(path, records)`: replace existing `(ipo_id, close_date)`
+  rows, keep prior verification and allotment-notified, drop duplicate
+  keys defensively (a dup would crash the scalar merge).
+- `records_needing_alert(records, existing)`: the 16:00 catch-up gate —
+  presence of the key only, not a field-level diff.
+- `rank_same_day_candidates(records)`: fill capital / EV-capital / rank
+  for APPLY-S1 names sharing a close_date. Does not change apply flags.
+- `capital_required` / `ev_capital_ratio`: lot rupees at the band cap,
+  and EV as a fraction of that ticket.
+- `listing_open_price` / `listing_low_price`: NSE then BSE then generic
+  keys, for outcome math.
+- `compute_actuals(master)`: realized S1 fields once listing open is on
+  the detail page; None until then so verify can retry tomorrow.
+- `performance_summary(frame)`: aggregate precision / predicted vs
+  realized-EV proxy on verified APPLY-S1 rows. Notes that S2 listing-day
+  return is not the 6-month target.
+- `_iso` / `_as_bool` / `_safe_float`: parsers so CSV strings and live
+  datetimes do not blow up comparisons.
+"""
 
 from __future__ import annotations
 

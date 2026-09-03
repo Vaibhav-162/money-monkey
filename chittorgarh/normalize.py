@@ -1,4 +1,49 @@
-"""Numeric, date, and text normalizers for Chittorgarh HTML."""
+"""Numeric, date, and text normalizers for Chittorgarh HTML.
+
+WHAT THIS FILE DOES
+--------------------
+Every scraper in this package hits messy Indian-market strings (₹, lakh/crore
+suffixes, day-month ranges without a consistent format, BSE numeric codes
+mixed with NSE tickers). This file is the shared converter from those strings
+to typed values. Callers inside the package: `parse_ipo.py` (almost every
+helper), `gmp.py`, `tracker.py`, `live_dashboard.py` (`MONTHS`, `clean_text`),
+`live_subscription.py`, and `registrar_allotment.py` (`parse_number`). Scripts
+do not import this directly — they go through those parsers. Covered by
+`tests/test_normalize.py`.
+
+KEY TERMS USED HERE
+--------------------
+- Crore (`Cr`): 10 million rupees. Issue size, OFS amount, and market cap
+  are stored as crore floats after the suffix is stripped.
+- Indian commas: grouping like `2,59,31,407` (thousands/lakhs/crores), not
+  Western `2,593,1407`. `parse_number` just deletes commas before the float.
+- Price band: the ₹low–₹high range at which the IPO is offered before the
+  final issue price is set. `parse_price_band` returns `(low, high)`.
+- `x` / `×`: subscription-multiple suffix ("7.26x" means 7.26 times shares
+  offered). Stripped so the stored value is a plain float.
+- BSE code vs NSE symbol: BSE uses a numeric scrip code; NSE uses a letter
+  ticker. Chittorgarh often jams both into one cell (`544839 / LCL`);
+  `parse_bse_nse` splits them.
+- Date range: cells like `23 to 27 Jul, 2026` (bidding window). `parse_date`
+  returns the start; `parse_date_range` returns both ends.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `clean_text(value)`: collapse whitespace / nbsp; empty string for None.
+- `parse_number(value)`: ₹ / Rs / % / x / Cr / Indian commas → float, or
+  None for `.`, `-`, `NA`, `To be declared`.
+- `parse_int(value)`: rounded `parse_number`.
+- `parse_shares_and_cr(value)`: split
+  `2,59,31,407 shares (agg. up to ₹1,101 Cr)` into `(shares, crore)`.
+- `parse_price_band(value)`: `(low, high)`; a single number is used for both.
+- `parse_bse_nse(value)`: `(bse_code, nse_symbol)` from a combined cell.
+- `parse_date(value)`: ISO `YYYY-MM-DD`; for a range, the start date.
+- `parse_date_range(value)`: `(open, close)` ISO dates.
+- `norm_key(value)`: lowercase alphanumerics-only key used to match table
+  labels in `parse_ipo.py` (`Face Value` → `face value`).
+- `MONTHS` / `WEEKDAYS`: month-name maps (dashboard year inference) and
+  weekday tokens stripped from dates.
+"""
 
 from __future__ import annotations
 

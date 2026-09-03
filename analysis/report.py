@@ -1,4 +1,35 @@
-"""Write JSON/CSV artifacts for the analysis run."""
+"""Write JSON/CSV artifacts for the analysis run.
+
+WHAT THIS FILE DOES
+--------------------
+Tiny I/O helper for the local trainer. `run_analysis.py` is the only
+caller: `dump_json` writes every `data/analysis/*.json` summary (EDA,
+baselines, walk-forward, ablation, stop-loss, quality-checklist eval,
+run `summary.json`); `write_predictions` writes `predictions.csv` with
+the identity/GMP/EV/quality columns plus any `pred_*` or `exret_*`
+fields the pipeline added. Nothing here models, scores, or scrapes.
+
+KEY TERMS USED HERE
+--------------------
+- GMP / `gmp_at_close` / `gmp_anchor`: unofficial pre-listing premium,
+  and whether that quote is dated at IPO close or leakily at listing.
+- Subscription multiple (`sub_total_x`): times-oversubscribed.
+- Allotment probability (`p_allot`) / realized EV: chance of getting
+  shares, and historical rupee profit per lot.
+- Clean pop / listing-day gain / open-return %: S1 labels copied onto
+  the predictions CSV so a fold can be inspected without re-joining.
+- Quality score / quality pass: the 0–4 checklist and its pass flag
+  (Strategy 2 live decision), not the experimental S2 regressor.
+- `pred_*` / `exret_*`: extra columns `run_analysis.py` may have attached
+  (e.g. `pred_s1_p_pop`, 6-month excess return) — included if present.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `dump_json(path, payload)`: pretty-print JSON, creating parent dirs.
+  `default=str` so datetimes/numpy scalars do not crash the dump.
+- `write_predictions(df, path)`: subset to the known report columns
+  (plus pred/exret extras) and write CSV without the index.
+"""
 
 from __future__ import annotations
 

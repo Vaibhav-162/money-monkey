@@ -5,6 +5,64 @@
 Needs data/ipos.csv. Uses data/gmp_history.csv and data/prices/returns.csv when present.
 Until you run the GMP re-scrape, gmp_at_close falls back to listing-anchored gmp_rs
 and is flagged gmp_anchor=listing_date_leaky.
+
+WHAT THIS FILE DOES
+--------------------
+This is the offline trainer/report CLI — the one command that turns the
+master IPO sheet into walk-forward metrics and the pickle files live
+scoring loads. It never hits the network. Production live alerts are
+`scripts/live_scanner.py`, which does *not* import this file; this file
+does *not* import `analysis.score` or `analysis.live_audit`.
+
+Pipeline order: `analysis.load.load_dataset` → `analysis.prices.load_nifty_20d`
+→ `analysis.features.add_features` → `analysis.targets.add_targets`, then
+quality-checklist eval (`analysis.baselines.evaluate_quality_checklist`),
+per-board EDA (`analysis.eda.board_eda`), friend-rule baselines
+(`rule1_listing_pop` / `rule2_long_hold` / `live_feasible_rule`),
+walk-forward S1/S2 (`analysis.backtest`), a full-history `fit_s1`/`fit_s2`
+per board (`analysis.models`) that *overwrites* the last walk-forward
+pickle, pooled S1 ablation, hypothetical stop-loss table, and
+`analysis.report` dumps under `{--out}/analysis/`. S1's delivered
+`apply_threshold` is copied from the last non-skipped walk-forward year.
+
+Re-run this after `scripts/rescrape_gmp_history.py` and
+`scripts/fetch_prices.py` so GMP is close-day-anchored and Strategy 2
+has 6-month excess returns; until then the summary JSON itself warns
+that GMP may be leaky and S2 is on the quality-ranker fallback.
+
+KEY TERMS USED HERE
+--------------------
+- Leakage: using information that would not have been knowable on close
+  day. Listing-anchored GMP (`gmp_anchor=listing_date_leaky`) is the
+  recurring case this CLI flags; `gmp_anchor=ipo_close` is the safe one.
+- GMP (Grey Market Premium): unofficial pre-listing premium. Close-day
+  `gmp_at_close` needs `data/gmp_history.csv`; otherwise `gmp_rs` is
+  copied and marked leaky.
+- Mainboard vs SME: every EDA, baseline, walk-forward, and delivered
+  pickle is per board. The only pooled run is the S1 ablation artifact.
+- Walk-forward: yearly train-on-past / test-on-next replay in
+  `backtest.py`. Not a random split — IPOs are a time series.
+- apply_s1 / apply_s2: the two decisions the scorer exists to produce.
+  This CLI trains the pickles and reports historical EV; it does not
+  send alerts. Live S2 apply is still the quality checklist, not the
+  S2 regressor.
+- Quality checklist: 0–4 sanity score evaluated here vs realized
+  `exret_126` into `s2_quality_checklist_eval.json`.
+- SHAP (`shap_s1` in `summary.json`): last walk-forward fold's top
+  features, so a run is inspectable without opening the pickle.
+- Pooled ablation / stop-loss sensitivity: comparison tables only —
+  not the delivered scorer, not fed back into `fit_*`.
+- Baselines: simple friend rules (listing-pop heuristic, long-hold
+  heuristic, live-feasible GMP/size/subscription cut) plus "apply
+  everything 2020+" so the ML numbers have a dumb comparator.
+- Outlier flags: high-sub, SM REIT/unit, price-outside-band, negative
+  PAT. Counted in the summary; kept in the model frame, not dropped.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `main(argv)`: argparse (`--out`, default `data`), run the pipeline,
+  print `summary.json`, return 0. Creates `{out}/analysis/` including
+  `models/{board}_s1.pkl` and `{board}_s2.pkl` for `score_features()`.
 """
 
 from __future__ import annotations

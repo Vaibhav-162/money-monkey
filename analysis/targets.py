@@ -1,4 +1,71 @@
-"""Strategy 1 and 2 labels. Listing prices are labels only."""
+"""Strategy 1 and 2 labels. Listing prices are labels only.
+
+WHAT THIS FILE DOES
+--------------------
+Builds the *outcomes* the models learn and the backtest scores against —
+never inputs. Listing open/low and first-day gain are used here as labels
+only; they must not leak into `analysis/features.py`.
+
+`run_analysis.py` calls `add_targets()` after `add_features()`. Live scoring
+does *not* call `add_targets`: `analysis/score.py` imports `quality_ranker`,
+`quality_checklist_for_row`, and `QUALITY_PASS_THRESHOLD` and runs those on
+the featured row (listing prices are unknown at close day anyway).
+`analysis/baselines.py` imports only the threshold, to evaluate the same
+pass/fail cut against realized 6-month excess returns.
+
+KEY TERMS USED HERE
+--------------------
+- Target variable: the thing we are trying to predict or evaluate. Strategy 1
+  uses a binary "clean pop" and a continuous open-day return; Strategy 2
+  uses a 6-month Nifty-excess hit (`s2_beat`) plus a 0–4 quality checklist.
+- Listing pop / `open_return_pct`: first-trade price vs issue price, in
+  percent. This is the continuous Strategy 1 label and the rupee-gain input
+  to expected value.
+- `is_clean_pop`: 1 only if listing-day gain is at least 15% *and* the day's
+  low never traded at or below issue (or low is missing). A gap-and-crash
+  print is not a "clean" pop.
+- Issue price: the allotment price. Denominator for open return; also the
+  floor that `listing_low` is compared against.
+- Allotment probability (`p_allot`): chance a retail applicant gets shares,
+  already computed in `add_features`. Multiplies expected rupee gain into
+  `realized_ev` — a huge pop is worthless if you are not allotted.
+- EV / Expected Value (`expected_gain_amt`, `realized_ev`): predicted
+  average profit per lot = (open return) × lot rupees × liquidity haircut,
+  then × `p_allot`. This is why friend rules that ignore allotment overstate
+  what a retail applicant actually makes.
+- Lot size / `retail_min_amount`: shares per lot and the rupee ticket for
+  one retail application. Percent gains are converted to rupees here
+  because a 15% pop on a ₹15,000 lot is not the same as on a ₹1,50,000 lot.
+- EV haircut (`ev_haircut`): 0.7 on small, high-GMP SME names (set in
+  features); otherwise 1.0. Discounts expected gain for illiquid prints.
+- `exret_126` / `s2_beat`: 126-session (~6 month) return minus Nifty over
+  the same window, and a 1/0 "beat by more than 5%" label. Comes from the
+  price join, not from listing OHLC.
+- Quality checklist (`quality_score` / `quality_pass`): 0–4 sanity score
+  (subscription, OFS, raw ROE, debt-equity). Pass is ≥ 3. This is what live
+  Strategy 2 `apply_s2` uses — not the experimental S2 regressor.
+- OFS ratio: fraction of the issue that is existing holders selling. Missing
+  OFS still *awards* a quality point (treated as "not a cash-out red flag").
+- ROE: return on equity, raw, never imputed in the ranker. Missing ROE does
+  *not* award a point.
+- Debt-equity: leverage. Missing D/E still awards a point (same "not
+  disclosed ≠ fail" idea as OFS).
+- Subscription multiple (`sub_total_x`): times-oversubscribed. The quality
+  check is a hard `> 20` cut.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `add_targets(df)`: writes open return, clean-pop, EV fields, `s2_beat`,
+  and the quality score/pass columns used by training and `run_analysis.py`.
+- `listing_open(df)` / `listing_low(df)`: NSE print if present, else BSE.
+  Label construction only.
+- `quality_ranker(df)`: 0–4 fallback Strategy 2 score from raw fundamentals.
+  Makes no return forecast — it is a cleanliness checklist.
+- `quality_checklist_for_row(row)`: same four checks, but per-item
+  pass / fail / not_disclosed so a missing OFS is not shown as a true pass.
+- `_num_col` / `_row_num`: NaN-safe getters. `df.get` + `pd.to_numeric` on a
+  missing column returns a scalar NaN and breaks chained `.fillna()`.
+"""
 
 from __future__ import annotations
 

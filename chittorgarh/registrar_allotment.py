@@ -1,7 +1,49 @@
 """Best-effort PAN allotment lookup on KFintech and MUFG Intime.
 
-Registrar portals require a captcha. OCR can miss; callers must fall back to a
-manual-check reminder. Never log or persist a full PAN.
+WHAT THIS FILE DOES
+--------------------
+After Chittorgarh shows that allotment is out, this file (optionally) asks
+the registrar's own portal whether a given PAN got shares. The only
+production caller is `scripts/check_allotment.py`, which passes in a
+Playwright `Page` from `browser.chromium_session` — this module does not
+launch a browser. It imports `parse_number` from `normalize.py` for share
+counts. Covered by `tests/test_registrar_allotment.py`.
+
+Registrar portals require a captcha. OCR can miss; callers must fall back
+to a manual-check reminder. Never log or persist a full PAN.
+
+KEY TERMS USED HERE
+--------------------
+- Allotment: the lottery that decides who receives IPO shares when the
+  issue is oversubscribed. "Allotted" / "not allotted" / "no application"
+  are the statuses this file returns.
+- Registrar: the company that runs that lottery and the PAN lookup portal.
+  Automated here: KFin Technologies (`kfin` / legacy `karvy`) and MUFG
+  Intime (also branded Link Intime). Bigshare, Cameo, Skyline, and Purva
+  are recognized but return `None` so the caller sends a manual-check note.
+- PAN: India's Permanent Account Number (personal tax ID), format
+  `ABCDE1234F`. Used to look up one person's application. Never put a full
+  PAN in a log line, Telegram message, or audit CSV — use `mask_pan`.
+- Captcha: the image the portal shows before search. Solved with Tesseract
+  OCR when Pillow/pytesseract are installed; otherwise status is
+  `captcha_failed` and the caller reminds the user to check by hand.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `mask_pan(pan)`: `ABCDE1234F` → `ABCDE***4F`. Safe for logs.
+- `load_pan_profiles(raw)`: parse `PAN_PROFILES` JSON (or the env var).
+  Drops malformed rows; never crashes the run.
+- `find_company_option(options, company_name)`: fuzzy-match the portal
+  dropdown to our `company_name` (strips Ltd/IPO/SME suffixes).
+- `solve_captcha(image_bytes)`: OCR; empty string on missing deps or fail.
+- `parse_result_blob(text)`: map visible page text to
+  allotted / not_allotted / no_application / captcha_failed / lookup_failed.
+- `checker_for_registrar(name)`: pick `check_kfintech`, `check_mufg`, or
+  None from the registrar string `parse_ipo` stored on the master row.
+- `check_kfintech(page, company_name, pan)` / `check_mufg(...)`: public
+  lookups with up to `CAPTCHA_ATTEMPTS` retries.
+- Private page drivers (`_once_kfintech`, `_once_mufg`, `_pick_company_select`,
+  `_fill_pan_input`, `_captcha_png`, `_submit`, …): one attempt at a portal.
 """
 
 from __future__ import annotations

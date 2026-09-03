@@ -338,3 +338,41 @@ def test_run_scan_propagates_discovery_exception_instead_of_swallowing(
     monkeypatch.setattr(live_scanner, "scrape_all_open_ipos", boom)
     with pytest.raises(RuntimeError, match="dashboard exploded"):
         run_scan(out_dir=tmp_path, fetch_gmp=False)
+
+
+def test_run_scan_does_not_mark_audit_row_seen_when_dispatch_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Regression: dispatch() now raises NotificationDeliveryError when
+    # Telegram+email both genuinely fail for a real batch. If the audit row
+    # got written anyway, the presence-only gate would treat this IPO as
+    # "already alerted" forever that day even though nobody ever received
+    # it. The row must stay absent so a fixed-credentials retry can still
+    # send the real alert.
+    discovery = {
+        "ipo_id": "2013",
+        "company_name": "Lumino",
+        "exchange_type": "mainboard",
+        "close_date": "2026-08-31",
+        "status": "open",
+        "url": "https://example.test/ipo/2013/",
+    }
+    rec = build_alert_record(MASTER, None, discovery)
+    monkeypatch.setattr(live_scanner, "_score_one", lambda *a, **k: dict(rec))
+    monkeypatch.setattr(live_scanner, "fetch_market_regime", lambda **k: "NEUTRAL")
+
+    def boom(records, dry_run=False):
+        raise RuntimeError("both channels down")
+
+    monkeypatch.setattr(live_scanner, "dispatch", boom)
+    audit_path = tmp_path / "live_audit_log.csv"
+
+    with pytest.raises(RuntimeError, match="both channels down"):
+        run_scan(
+            rows=[discovery],
+            as_of=date(2026, 8, 31),
+            out_dir=tmp_path,
+            fetch_gmp=False,
+            dry_run=False,
+        )
+    assert not audit_path.exists()

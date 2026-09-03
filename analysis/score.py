@@ -1,4 +1,70 @@
-"""Close-day scorer. Dispatches to the board-specific model. Never mixes boards."""
+"""Close-day scorer. Dispatches to the board-specific model. Never mixes boards.
+
+WHAT THIS FILE DOES
+--------------------
+This is the live Apply/Skip API: one IPO row of fields knowable at ~15:30
+IST on close day in, a dict of S1/S2 decisions out. It never trains and
+never sees listing OHLC. `scripts/live_scanner.py` is the production
+caller (`score_features` after `to_score_row`); README examples and
+`tests/test_live_scanner.py` / `tests/test_score_s2_hybrid.py` are the
+other users. The historical trainer (`run_analysis.py`) does *not* import
+this module — it writes the pickles this file later loads.
+
+`Scorer` loads `{board}_s1.pkl` / `{board}_s2.pkl` from
+`data/analysis/models/` via `analysis.models.load_bundle`, then calls
+`predict_s1_proba`, `predict_s1_open_return`, and `predict_s2`. Before
+that it runs `analysis.features.add_features` on a one-row frame (same
+math as training) and `analysis.targets.quality_ranker` /
+`quality_checklist_for_row` for Strategy 2. Unknown `exchange_type`
+raises; `mainline`/`main` are coerced to `mainboard`.
+
+KEY TERMS USED HERE
+--------------------
+- Close day: last IST day investors can apply. Predictions here must use
+  only information available then (GMP, subscription, fundamentals) —
+  listing prices are the thing we are trying to forecast, not an input.
+- Mainboard vs SME: `score_row` routes to that board's pickles. Mixing
+  boards would violate the "never fit across boards" rule in `models.py`.
+- apply_s1: Strategy 1 decision — apply for a listing-day flip if
+  `p_pop` ≥ the bundle's `apply_threshold` (copied from the last
+  walk-forward year by `run_analysis.py`). False when no S1 bundle.
+- apply_s2: Strategy 2 decision — *always* the 4-point quality checklist
+  (`quality_score` ≥ `QUALITY_PASS_THRESHOLD`, currently 3), never the
+  S2 LightGBM. A high `s2_model_exret_pred` cannot flip apply_s2.
+- Quality score / checklist: 0–4 sanity card (subscription, OFS ratio,
+  ROE, debt-equity). `quality_breakdown` is pass/fail/not_disclosed per
+  check so a missing OFS is not shown as a genuine pass.
+- p_pop: model P(clean pop) — a strong, held first-day price jump.
+- p_allot: chance a retail applicant gets *any* shares when the book is
+  oversubscribed. Already computed in `add_features`.
+- EV / `ev_retail`: p_allot × expected rupee gain per lot. Gain is
+  (predicted open-return % / 100) × lot rupees × `ev_haircut` when the
+  S1 regressor exists (`ev_retail_source: lgbm_regressor`); otherwise a
+  linear proxy in p_pop (`p_pop_heuristic_fallback`).
+- Lot size / `retail_min_amount`: shares per application, or the rupee
+  ticket for one retail lot. Percent returns are converted to rupees
+  here because a 15% pop on a small lot is not the same as on a large one.
+- GMP missing / liquidity_flag: `gmp_missing` tells the model there was
+  no street quote; `liquidity_risk` / `ev_haircut` discount illiquid SME
+  prints inside the EV math (set in features, consumed here).
+- S2 model status (`experimental_unvalidated`): the walk-forward S2
+  regressor is exposed as `s2_model_exret_pred` for monitoring only. It
+  is not what apply_s2 uses.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `score_features(new_ipo_row, model_dir)`: public entry. Caches one
+  `Scorer` per process (rebuilt if `model_dir` changes) and returns
+  Apply/Skip plus EV/quality fields for a single live IPO.
+- `Scorer`: loads and caches per-board bundles; `score_row` is the
+  actual feature → predict → EV assembly.
+- `_board_of(row)`: maps `exchange_type`/`board` to `mainboard` or
+  `sme`. Rejects anything else so a bad scrape cannot silently hit the
+  wrong pickle.
+- `_bundle(board, strategy)`: pickle load with in-memory cache; None if
+  the file is missing (S1 then yields no apply, S2 still has the
+  checklist).
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,42 @@
-"""Playwright scraper for the IPO performance tracker index."""
+"""Playwright scraper for the IPO performance tracker index.
+
+WHAT THIS FILE DOES
+--------------------
+This is how the historical scrape *discovers* which IPOs exist. Chittorgarh's
+performance tracker (`/ipo/ipo_perf_tracker.asp?exchange=&year=`) is a
+JavaScript DataTables page, so static HTTP is not enough — this file launches
+Chromium via `browser.chromium_page`. The only production caller is
+`pipeline.scrape_index()`, which loops year × exchange and concatenates the
+rows. Live "what is open today" discovery is a different page and lives in
+`live_dashboard.py`. Each row's `url` / `ipo_id` later feeds `parse_ipo.py`.
+
+KEY TERMS USED HERE
+--------------------
+- Performance tracker: Chittorgarh's year-by-year index of *already listed*
+  IPOs (not the current open/upcoming dashboard).
+- Mainline / mainboard vs SME: the two exchange tiers the tracker filters
+  on. The URL query uses `exchange=mainline` or `exchange=sme`; stored
+  `exchange_type` is normalized to `mainboard` or `sme`.
+- `ipo_id` / slug: the numeric Chittorgarh id and URL slug in
+  `/ipo/{slug}/{id}/`. The id is the stable key everywhere else in the repo.
+- Issue price: the IPO sale price, taken from a tracker table column (later
+  overwritten by the detail-page parse if present).
+- Listing-day close / listing-day gain %: first-day close and percent jump
+  vs issue price — the "listing pop" the models later try to predict.
+- DataTables: the JS table widget. It paginates unless we force "All" rows,
+  which is why this needs Playwright rather than `HttpClient`.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `tracker_url(exchange, year)`: builds the tracker URL; maps `mainboard` →
+  the site's `mainline` query value.
+- `_parse_href(href)`: pulls `(ipo_id, slug, absolute_url)` out of an
+  `/ipo/{slug}/{id}/` link.
+- `scrape_tracker(exchange, year, timeout_ms, headless)`: opens the tracker,
+  expands DataTables to all rows, and returns one dict per unique `ipo_id`
+  (company name, listing date, issue price, listing-day stats, current
+  price). Empty list if the year/board has "No Record Found".
+"""
 
 from __future__ import annotations
 

@@ -1,17 +1,66 @@
 """Small hyperparameter search via inner expanding-window CV, per board.
 
-The plan is explicit that any depth/leaves difference between mainboard and SME
-models must come from what the data rewards inside each board's own training
-window, not from a hardcoded "SME gets deeper trees" rule. This module runs a
-small grid (matching the originally proposed search space: max_depth,
-learning_rate, min_child_weight, num_leaves) through leave-one-future-year-out
-folds *inside* the outer walk-forward train slice, so the outer test year is
-never touched by tuning.
+WHAT THIS FILE DOES
+--------------------
+Picks LightGBM `max_depth` / `learning_rate` / `min_child_weight` /
+`num_leaves` for one board's current *train* slice. The plan is explicit
+that any depth/leaves difference between mainboard and SME must come from
+what that board's own window rewards, not from a hardcoded "SME gets
+deeper trees" rule.
 
-With only a handful of listing years per board there usually are not enough
-inner folds for a statistically strong pick -- when that happens we fall back
-to one documented, conservative default rather than pretending the search was
-decisive.
+The only production caller is `analysis/models.py`: `fit_s1` calls
+`select_classifier_params` (label `is_clean_pop`) and
+`select_regressor_params` (label `open_return_pct`); `fit_s2` calls
+`select_regressor_params` (label `exret_126`). Nothing else imports this
+module. The search is leave-one-future-year-out *inside* the outer
+walk-forward train slice (`analysis/backtest.py` owns the outer split),
+so the outer test year is never touched by tuning. Features come from
+`analysis.features.feature_matrix`.
+
+With only a handful of listing years per board there usually are not
+enough inner folds for a statistically strong pick — when that happens
+we fall back to one documented, conservative `DEFAULT_PARAMS` rather
+than pretending the search was decisive.
+
+KEY TERMS USED HERE
+--------------------
+- LightGBM: the gradient-boosted trees being tuned. Classifier for S1
+  clean-pop; regressor for S1 open-return and S2 6-month excess return.
+- Hyperparameter grid: the originally proposed search space —
+  `max_depth` {3,5,7}, `learning_rate` {0.03,0.1}, `min_child_weight`
+  {5,20,50}, `num_leaves` {8,31}. Same grid for classifier and regressor.
+- Inner expanding-window / leave-one-future-year-out CV: for each later
+  `listing_year` in the *train* frame, fit on earlier years and score
+  that year. This is walk-forward nested inside walk-forward — not a
+  random K-fold, which would let "future" IPOs leak into a "past" fit.
+- Walk-forward (outer): owned by `backtest.py`. This file must not see
+  that outer test year; `models.fit_*` only passes the current train.
+- EV / `realized_ev`: historical rupee profit per lot. The classifier
+  search scores each combo by mean EV of the top-20% highest-probability
+  inner-test rows (an Apply-the-best-fifth proxy), not by accuracy.
+- RMSE: root-mean-square error of the regressor's predictions vs the
+  inner-test label. Lower wins. Used for both open-return and `exret_126`.
+- Mainboard vs SME: not branched on here. Callers already sliced one
+  board; a thin SME window simply fails the inner-fold minimums and
+  gets `DEFAULT_PARAMS`.
+- Leakage: using the outer test year (or listing prices as features)
+  would overstate how well a live close-day pick would have done.
+  Inner folds require `listing_year` and skip a year that is too small.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `select_classifier_params(train, feature_cols, label_col, ...)`: pick
+  the four LightGBM knobs by inner-fold mean top-20% EV. Returns
+  `DEFAULT_PARAMS` if LightGBM is missing or there is not one usable
+  inner fold (<30 train / <6 test rows, or no `listing_year`).
+- `select_regressor_params(train, feature_cols, label_col, ...)`: same
+  grid, scored by inner-fold RMSE (lower is better). Same fallback.
+- `_inner_year_folds(train, min_train, min_test)`: build those
+  expanding year splits; empty list if the column is missing.
+- `_grid_combos(grid)`: Cartesian product of the four-knob grid.
+- `CLASSIFIER_GRID` / `REGRESSOR_GRID` / `DEFAULT_PARAMS`: the search
+  space and the conservative fallback (`max_depth=4`, `lr=0.05`,
+  `min_child_weight=20`, `num_leaves=8`).
 """
 
 from __future__ import annotations

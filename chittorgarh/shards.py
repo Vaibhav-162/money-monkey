@@ -1,4 +1,41 @@
-"""Process-shard helpers for parallel network jobs. No scraping here."""
+"""Process-shard helpers for parallel network jobs. No scraping here.
+
+WHAT THIS FILE DOES
+--------------------
+Generic split / merge / spawn utilities so a long network job can run as N
+worker processes and resume from part-files. This file does not scrape.
+Callers are `scripts/rescrape_gmp_history.py` (InvestorGain GMP history)
+and `scripts/fetch_prices.py` (post-listing prices) — both pass `--workers`.
+The historical `pipeline.run_pipeline` / `scrape_ipos.py` path is sequential
+and does **not** import this module. Merge uses `export.append_or_replace`
+so an IPO's existing block is replaced in full. Covered by
+`tests/test_shards.py`.
+
+KEY TERMS USED HERE
+--------------------
+- Shard: one slice of a work list, `items[i]` where `i % shards == shard`.
+  Worker `i` of `N` only processes its slice, so N processes do not overlap.
+- `ipo_id`: the Chittorgarh numeric id used as the merge key in every
+  part-CSV this helper touches.
+- `gmp_history.csv`: many dated rows per `ipo_id`. A naive
+  `drop_duplicates` would collapse an IPO's archive to one row;
+  `merge_csv_replace_by_ipo_id` keeps every date-row in the new block.
+- Parent / worker: the parent process calls `launch_worker_processes`;
+  each child re-invokes the same script with `--shard i --shards N`.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `shard_slice(items, shard, shards)`: round-robin partition of a sequence.
+- `ids_from_csv(path)` / `ids_from_paths(paths)`: `ipo_id` sets already
+  written (resume: skip work that landed in the dest or a part-file).
+- `merge_csv_replace_by_ipo_id(dest, parts)`: drop dest rows for every id
+  present in the part-files, then append those part-files in full. Returns
+  how many distinct ids were merged.
+- `delete_paths(paths)`: unlink shard part-files after a successful merge.
+- `launch_worker_processes(script, n, extra, cwd)`: spawn N copies of
+  `script` with `--shard i --shards N` plus `extra` flags; inherit stdout;
+  return each process's exit code.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,86 @@
-"""Close-day IPO scan: discover, scrape live GMP/sub, score, alert, audit."""
+"""Close-day IPO scan: discover, scrape live GMP/sub, score, alert, audit.
+
+WHAT THIS FILE DOES
+--------------------
+This is the weekday afternoon pipeline: find IPOs whose bidding window
+closes today (IST), scrape a live snapshot of each one, run the same
+`score_features()` models as the historical trainer, send Telegram/email
+cards, then upsert a row in `data/live_audit_log.csv`.
+
+`.github/workflows/daily_ipo_alert.yml` is the only production entrypoint.
+It runs `python scripts/live_scanner.py --out data` on three weekday
+`schedule` crons (15:15 IST hedge, 15:30 IST primary, 16:00 IST catch-up)
+and on `workflow_dispatch`. A manual "Run workflow" click defaults to
+`--dry-run` (the `dry_run` checkbox) so an off-hours test cannot consume
+the day's one real alert; scheduled ticks always send for real. Locally
+you can also run this file as a CLI (`--dry-run`, `--include-open`,
+`--no-gmp`). Nothing else in the package imports `run_scan()` except tests.
+
+This file calls into `chittorgarh.live_dashboard` (discover open IPOs on
+both boards), `chittorgarh.pipeline.scrape_one` (detail page + InvestorGain
+GMP via Playwright), `chittorgarh.live_subscription` (live Chittorgarh
+subscription), `analysis.score.score_features` (S1/S2 decisions),
+`analysis.market_regime.fetch_market_regime` (Nifty flag),
+`analysis.live_audit` (rank, presence-only gate, audit CSV), and
+`scripts.notify.dispatch` / `send_failure_alert`.
+
+`dispatch()` runs **before** `upsert_audit()`. If delivery raises
+`NotificationDeliveryError`, the audit row must stay absent: the
+presence-only gate treats any existing `(ipo_id, close_date)` row as
+"already alerted", so writing first would permanently lose that IPO's
+alert for the day even after a credentials fix and retry.
+
+KEY TERMS USED HERE
+--------------------
+- Close date / bidding window: the last IST day investors can apply. The
+  three afternoon ticks are timed so QIB/HNI books are mostly in and you
+  still have time before typical 4:00–4:30 PM IST broker UPI cutoffs.
+  Cards are a live snapshot — GMP and subscription can still move.
+- Mainboard vs SME: Chittorgarh publishes two dashboards. Discovery
+  scrapes both; a zero-row result on **both** boards is treated as a
+  likely HTML-structure break and fires `send_failure_alert()`. Zero
+  *closers today* (IPOs exist, none close today) is a silent no-op.
+- GMP (Grey Market Premium): unofficial pre-listing premium in rupees
+  over issue price, scraped from InvestorGain with Playwright unless
+  `--no-gmp`. Fed into the scorer as the live stand-in for `gmp_at_close`.
+- Subscription multiple: live `sub_total_x` (Chittorgarh, the training
+  source for `p_allot`) plus `sub_ig_x` (InvestorGain, display-only) and
+  `sub_qib_x` (QIB, ranking/display overlay — not a model feature).
+- apply_s1 / EV: Strategy 1 "apply for listing pop". Same-day APPLY
+  names are ranked by `ev_retail / (price_band_high * lot_size)` with
+  QIB as the tie-breaker; a lone applicant is left unranked.
+- Market regime (`BULLISH` / `BEARISH` / `NEUTRAL`): one Nifty-50
+  5-session flag stamped on every card and cached at
+  `data/analysis/market_regime.json`. Drives S2 moderate-score copy.
+- Presence-only gate / audit log: `records_needing_alert()` keeps a
+  record only when no `(ipo_id, close_date)` row exists yet in
+  `data/live_audit_log.csv`. It does not compare field values, so the
+  first real write of the day is the one alert — later ticks that day
+  stay silent even if GMP/Sub moved. That is why dry-run must not write.
+- Dry-run vs real run: `--dry-run` prints cards and skips both send and
+  audit write. The Actions `workflow_dispatch` `dry_run` checkbox (default
+  true) maps onto that flag; `schedule` ticks ignore it.
+- GitHub Actions `schedule` vs `workflow_dispatch`: cron is the daily
+  production path. Manual dispatch is for a dropped tick (uncheck dry-run)
+  or a safe print-only test (leave it checked).
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `run_scan(...)`: the whole pipeline. Discovers (or accepts injected
+  `rows`), scores each closer, stamps regime + timestamps, ranks, filters
+  through the presence-only gate, dispatches, then upserts the audit.
+  Returns every scored record, including ones that were not re-alerted.
+- `_select_candidates(rows, as_of, include_open)`: default is
+  `close_date == as_of`. `--include-open` also scores currently-open
+  issues (weekend / local testing).
+- `_score_one(...)`: scrape one IPO (detail + optional GMP + live sub),
+  then `score_features()`. A scrape or score exception becomes a SCAN
+  ERROR record, not a SKIP, so the card never pretends the model decided.
+- `as_of_year_fallback(discovery)`: Chittorgarh date badges have no year;
+  this supplies `listing_year` for the scorer when `close_date` is thin.
+- `main(argv)`: CLI + the empty-discovery / crash path that calls
+  `send_failure_alert()` then re-raises so Actions goes red.
+"""
 
 from __future__ import annotations
 
@@ -165,9 +247,18 @@ def run_scan(
         skipped = len(records) - len(to_alert)
         if skipped:
             print(f"[scan] skip {skipped} alert(s) with an existing audit row (already alerted)")
+
+    # Dispatch BEFORE marking these rows as seen. If delivery genuinely
+    # fails (dispatch raises NotificationDeliveryError), the audit row must
+    # stay absent so the presence-only gate does not treat a lost alert as
+    # "already alerted" -- a fixed-credentials retry can then actually
+    # re-send instead of silently skipping these IPOs for the rest of the
+    # day.
+    dispatch(to_alert, dry_run=dry_run)
+
+    if write_audit and not dry_run:
         upsert_audit(audit_path, records)
         print(f"[scan] wrote {audit_path}")
-    dispatch(to_alert, dry_run=dry_run)
     return records
 
 

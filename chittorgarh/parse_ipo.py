@@ -1,4 +1,71 @@
-"""Heading- and key-driven parser for Chittorgarh IPO detail pages."""
+"""Heading- and key-driven parser for Chittorgarh IPO detail pages.
+
+WHAT THIS FILE DOES
+--------------------
+Turns one Chittorgarh IPO detail-page HTML blob into a typed `master` dict
+plus satellite tables (financials, KPIs, reservation, subscription, listing
+day, objects of issue, OFS sellers). Tables are classified by heading text
+and first-column keys, not CSS classes, because the site restyles often.
+`pipeline.scrape_one` is the main caller (historical scrape and, via that
+function, `scripts/live_scanner.py`). `scripts/check_allotment.py` and
+`scripts/verify_outcomes.py` call `parse_ipo_html` directly. Tests cover
+Lohia (`test_parse_lohia.py`, `test_master_sheet.py`) and OFS zero-fill
+(`test_parse_ipo.py`). GMP columns are left None here — `pipeline.py` /
+`gmp.py` fill them afterwards. Depends on `normalize.py` for every numeric
+and date conversion, and `http.BASE_URL` to absolutize relative links.
+
+KEY TERMS USED HERE
+--------------------
+- Issue price / price band: the final sale price, and the ₹low–₹high range
+  offered before that price was fixed. If issue price is missing, the band
+  high is used.
+- Lot size: the minimum bundle of shares a retail applicant must bid for.
+  The lot-size table also has retail / sHNI / bHNI min–max lots and rupees.
+- Issue size (crore): total rupees raised. Split into fresh issue (new
+  company capital) and OFS (Offer For Sale — existing holders cashing out).
+- Fresh-only OFS zero: Chittorgarh omits the OFS row on fresh-capital-only
+  IPOs. `_resolve_ofs_cr` stores 0, not None, so "missing" is not "unknown".
+- QIB / NII / HNI / retail: applicant categories. QIB = institutions;
+  NII/HNI = non-institutional / high-net-worth (split into sNII and bNII);
+  retail = individual small lots. Reservation % and `sub_*_x` are per
+  category.
+- Subscription multiple (`sub_*_x`): times the reserved shares were applied
+  for. Category rows can be paywalled (`ipomatrix`); only Total may remain.
+- Allotment / Basis of Allotment (BoA): the published lottery result.
+  `parse_allotment_published` looks for a BoA document/link — used by the
+  live allotment notifier — not merely the timetable "Allotment" date.
+- Registrar: KFin, MUFG Intime, Bigshare, etc. — the firm that runs the
+  allotment portal. Parsed from the Registrar heading.
+- Listing day OHLC: first-trade open/high/low/last on BSE and NSE (the
+  "listing pop" vs issue price).
+- Anchor: pre-IPO institutional placement with 30/90-day lock-ins.
+- Promoter: controlling shareholders; pre/post-issue % is a dilution signal.
+- ISIN / BSE code / NSE symbol: security identifiers on the issue-size table.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `parse_ipo_html(html, url, exchange_type, listing_year, tracker)`: the
+  public entry. Classifies every table, fills `master`, and returns
+  `{"master": ..., "satellites": ...}`. `tracker` supplies listing-day
+  performance fields the detail page does not repeat.
+- `parse_allotment_published(soup)`: True if a Basis of Allotment link or
+  "allotment out/finalized" wording is on the page. Also stored on master.
+- `_classify_table(rows)`: maps a table to `ipo_details`, `issue_size`,
+  `reservation`, `lot_size`, `financials`, `kpis`, `subscription`,
+  `listing_day`, `ofs`, etc., or None.
+- `_resolve_ofs_cr(...)`: treat a missing OFS row as 0 on fresh-only issues.
+- Per-table parsers (`_parse_financials`, `_parse_reservation`,
+  `_parse_subscription`, `_parse_listing_day`, `_parse_lot_size`,
+  `_parse_valuation`, `_parse_shareholding`, `_parse_objects`, `_parse_ofs`,
+  `_parse_reviews`): turn classified rows into satellite records or master
+  scalars.
+- Page-level extractors (`_parse_timetable`, `_parse_industry`,
+  `_parse_about`, `_parse_registrar`, `_parse_lead_managers`,
+  `_parse_contact`, `_promoters`): headings and prose around the tables.
+- Small helpers (`_kv_map`, `_find_key`, `_sub_x`, `_reservation_pct`,
+  `_latest_kpi`, `_latest_fin`, `_norm_sale_type`, `_cell_text`, …): key
+  lookup and "latest fiscal year" picks.
+"""
 
 from __future__ import annotations
 

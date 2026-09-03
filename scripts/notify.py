@@ -1,4 +1,120 @@
-"""Zero-cost alert dispatch: Telegram (primary) and optional SMTP email."""
+"""Zero-cost alert dispatch: Telegram (primary) and optional SMTP email.
+
+WHAT THIS FILE DOES
+--------------------
+This is the single place that turns a scored IPO record into human-readable
+messages and actually sends them. Nothing else in the codebase talks to
+Telegram or Gmail directly.
+
+`scripts/live_scanner.py` is the close-day caller: it imports `dispatch()`
+(one Telegram card per IPO plus one email digest) and `send_failure_alert()`
+(pipeline-crash / empty-dashboard heads-up). `.github/workflows/daily_ipo_alert.yml`
+invokes that scanner as `python scripts/live_scanner.py --out data` on three
+weekday crons (15:15 / 15:30 / 16:00 IST) and on `workflow_dispatch`.
+
+`scripts/check_allotment.py` is the allotment-day caller: it does **not**
+use `dispatch()`. It imports the allotment formatters plus `send_telegram()` /
+`send_email()` / `NotificationDeliveryError` and sends its own cards.
+`.github/workflows/check_allotment.yml` runs that script as
+`python scripts/check_allotment.py --out data` at 12:00 IST weekdays.
+
+`dispatch()` raises `NotificationDeliveryError` when a real (non-dry) batch
+has records and **both** channels genuinely fail (an exception was raised).
+A channel that is simply unconfigured returns False and is an intentional
+silent no-op. The raise exists so a dead Gmail app password or bad Telegram
+token becomes a red CI failure instead of a green run that delivered
+nothing. Callers therefore send **before** writing the audit /
+`allotment_notified` flag, so a failed delivery does not consume the day's
+one-alert slot.
+
+KEY TERMS USED HERE
+--------------------
+- GMP (Grey Market Premium): the unofficial premium buyers pay for IPO
+  shares before listing, in rupees over the issue price. Cards show
+  `gmp_rs` from InvestorGain, plus the as-of date when we have one.
+- Subscription multiple (`sub_total_x` / `sub_ig_x`): how many times the
+  issue is oversubscribed. Chittorgarh (`sub_total_x`) and InvestorGain
+  (`sub_ig_x`) can disagree; the card prints both when present.
+- QIB (Qualified Institutional Buyer): large funds/banks whose subscription
+  (`sub_qib_x`) is shown as an informational fifth checklist line. It does
+  not affect the /4 quality score.
+- OFS (Offer For Sale): existing shareholders selling their shares, as
+  opposed to the company raising fresh capital. The checklist row
+  "Fresh Capital / Low OFS" is one of the four scored quality checks.
+- apply_s1 / apply_s2: the two trading-strategy decisions. S1 is "apply for
+  a listing-day pop" (uses `p_pop`, `p_allot`, `ev_retail`). S2 is
+  "quality / hold" and drives the hold-vs-flip copy from `quality_score`
+  plus market regime.
+- EV (Expected Value): `ev_retail` — predicted rupees of expected listing
+  gain per retail lot after haircutting for allotment odds. The S1 APPLY
+  copy cites it as the reason to lock up capital.
+- Quality checklist: four scored PASS/FAIL/UNKNOWN rows (subscription,
+  OFS, ROE, debt-to-equity) rendered with emoji. Machine keys like
+  `sub_gt_20` are never printed.
+- Market regime (`BULLISH` / `BEARISH` / `NEUTRAL`): Nifty-50 5-session
+  flag stamped by the scanner. Only the S2 score-2 (moderate) copy
+  branches on it.
+- Price band / lot size: the high end of the issue price range
+  (`price_band_high`) and the minimum-application share count. Together
+  they are the cash a retail applicant must lock up.
+- Mainboard vs SME: `board` / `exchange_type` on the card header. NSE/BSE
+  mainboard issues vs the smaller SME boards; the scorer trains them
+  separately.
+- Close date: the last day of the bidding window — the deadline the
+  weekday afternoon scan is racing. Shown on every card.
+- Registrar: the house that runs the allotment lottery and PAN-lookup
+  portal (KFin / Karvy, MUFG Intime / Link Intime, Bigshare, Cameo,
+  Skyline, Purva). Allotment cards link the matching portal, or fall
+  back to Chittorgarh's allotment-status page.
+- Allotment: whether an applicant actually received shares. Personalized
+  emails say Allotted / Not allotted / No application; they never include
+  a PAN.
+- PAN (Permanent Account Number): India's personal tax ID used to look up
+  one person's application. Never put a PAN in a Telegram message, email
+  subject, or log line. Telegram allotment summaries are counts only.
+- Dry-run: `--dry-run` / the Actions `workflow_dispatch` `dry_run`
+  checkbox. `dispatch()` prints cards and returns 0 without sending, so a
+  manual test cannot consume the day's one real alert.
+- Failure-alert dedup: `send_failure_alert()` writes
+  `data/live_alert_state.json` with today's IST date so a crashing scanner
+  sends at most one "FAILED" Telegram/email per calendar day.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `dispatch(records, dry_run)`: the main close-day entry point. One
+  Telegram message per IPO plus one email digest. Raises
+  `NotificationDeliveryError` if a real send fails on both channels so a
+  broken credential is a loud CI failure, not a silent one. Unconfigured
+  channels stay a silent no-op.
+- `NotificationDeliveryError`: raised by `dispatch()` (and by
+  `check_allotment`'s own send helpers) when every attempted real channel
+  threw. Callers must not mark the audit "already alerted" until this
+  either succeeds or is an intentional skip.
+- `send_telegram(text)` / `send_email(subject, body, ...)`: thin HTTP/SMTP
+  wrappers. Return False (no exception) when secrets are unset; raise on
+  a genuine API/SMTP error. Email `to_addr` overrides `ALERT_EMAIL_TO`
+  so allotment results can go to one person only.
+- `send_failure_alert(error, state_path)`: best-effort Telegram + email
+  of a scanner crash / empty-dashboard warning, capped at one send per
+  IST day via the state JSON. Its own send exceptions are printed, not
+  re-raised — a failure-alert must not hide the original traceback.
+- `format_card(record)`: close-day Telegram/email HTML. SCAN ERROR cards
+  are distinct from SKIP so a scrape/score failure is never mistaken for
+  a model decision.
+- `format_email_digest(cards)`: wraps one or more cards in a Gmail-safe
+  HTML document (newlines become `<br>`).
+- `format_allotment_card(record)` / `format_allotment_result_email(...)` /
+  `format_allotment_telegram_summary(...)`: allotment-out copy used by
+  `check_allotment.py`. Personalized emails never include PAN; Telegram
+  gets counts only.
+- `registrar_portal_url(name)`: maps a registrar name blob onto that
+  house's public PAN-lookup URL.
+- Secret / format helpers (`_redact`, `_clean_secret`, `_env`,
+  `_split_recipients`, `_app_password`, `_fmt_*`, `_checklist_lines`,
+  `_s2_status_and_copy`, `_safe_print`): strip Windows-quoted secrets and
+  Telegram tokens out of logs, skip malformed `ALERT_EMAIL_TO` addresses,
+  and keep ₹ from crashing a Windows cp1252 dry-run print.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +132,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 _TOKEN_IN_URL = re.compile(r"/bot\d+:[A-Za-z0-9_-]+/")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # Canonical checklist: never print machine keys like sub_gt_20.
 CHECKLIST = (
@@ -90,13 +207,20 @@ def _env(name: str) -> str:
 
 
 def _split_recipients(value: str) -> list[str]:
-    """Split a comma-separated recipient string into unique, stripped addresses."""
+    """Split a comma-separated recipient string into unique, stripped addresses.
+
+    Malformed entries are skipped with a warning so one bad ALERT_EMAIL_TO
+    token cannot make smtplib.sendmail() reject the whole batch.
+    """
     cleaned = _clean_secret(value)
     recipients: list[str] = []
     seen: set[str] = set()
     for part in cleaned.split(","):
         addr = part.strip()
         if not addr:
+            continue
+        if not _EMAIL_RE.match(addr):
+            print(f"[notify] skipping malformed email recipient: {addr!r}")
             continue
         key = addr.lower()
         if key in seen:
@@ -571,6 +695,13 @@ def _safe_print(text: str) -> None:
         print(text.encode("ascii", errors="replace").decode("ascii"))
 
 
+class NotificationDeliveryError(RuntimeError):
+    """Both Telegram and email genuinely errored for a real (non-dry) alert
+    batch. Raising this (instead of the old print-and-swallow) turns a
+    false-green Actions run into a red, visible failure so a dead Gmail app
+    password or a bad Telegram token cannot go unnoticed for days."""
+
+
 def dispatch(records: list[dict[str, Any]], *, dry_run: bool = False) -> int:
     """One Telegram message per IPO; one email digest for the whole run."""
     cards = [format_card(rec)["html"] for rec in records]
@@ -585,14 +716,18 @@ def dispatch(records: list[dict[str, Any]], *, dry_run: bool = False) -> int:
         return 0
 
     sent = 0
+    telegram_errors: list[str] = []
     for rec, card in zip(records, cards):
         company = rec.get("company_name") or rec.get("ipo_id") or "IPO"
         try:
             if send_telegram(card):
                 sent += 1
         except Exception as exc:
-            print(f"[notify] Telegram error for {company}: {_redact(str(exc))}")
+            msg = f"Telegram error for {company}: {_redact(str(exc))}"
+            print(f"[notify] {msg}")
+            telegram_errors.append(msg)
 
+    email_error: Optional[str] = None
     if records:
         names = [str(r.get("company_name") or r.get("ipo_id") or "IPO") for r in records]
         subject = f"IPO alerts ({len(names)}): " + ", ".join(names[:4])
@@ -601,5 +736,21 @@ def dispatch(records: list[dict[str, Any]], *, dry_run: bool = False) -> int:
         try:
             send_email(subject, format_email_digest(cards))
         except Exception as exc:
-            print(f"[notify] Email digest error: {_redact(str(exc))}")
+            email_error = f"Email digest error: {_redact(str(exc))}"
+            print(f"[notify] {email_error}")
+
+    # Only escalate on a genuine send failure (an exception was actually
+    # raised), never on Telegram being merely unconfigured (send_telegram
+    # returns False + prints a skip notice, no exception) -- that stays a
+    # silent, intentional no-op like before. But if email actively errored
+    # and nothing at all got through Telegram either, the whole batch of
+    # real alerts was lost with no visible sign of it -- that is exactly
+    # the failure mode that hid this bug for two days, so raise loudly
+    # instead of returning a clean 0.
+    if records and sent == 0 and email_error is not None:
+        details = "; ".join(telegram_errors + [email_error])
+        raise NotificationDeliveryError(
+            f"Both Telegram and email failed to deliver {len(records)} "
+            f"real alert(s): {details}"
+        )
     return sent

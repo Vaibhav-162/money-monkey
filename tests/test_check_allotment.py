@@ -2,11 +2,19 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pytest
+import smtplib
 from bs4 import BeautifulSoup
 
 from analysis.live_audit import AUDIT_COLUMNS, read_audit, write_audit
 from chittorgarh.parse_ipo import parse_allotment_published
-from scripts.check_allotment import is_allotment_due, run_check
+from scripts.check_allotment import (
+    dispatch_allotment,
+    dispatch_pan_results,
+    is_allotment_due,
+    run_check,
+)
+from scripts.notify import NotificationDeliveryError
 
 
 PUBLISHED_HTML = """
@@ -364,4 +372,110 @@ def test_allotment_manual_dispatch_defaults_to_dry_run() -> None:
     assert "default: true" in text
     assert "--dry-run" in text
     assert "github.event_name == 'workflow_dispatch' && inputs.dry_run" in text
+
+
+def test_dispatch_allotment_raises_when_telegram_and_email_both_fail(monkeypatch) -> None:
+    def telegram_boom(text, **kw):
+        raise RuntimeError("telegram down")
+
+    def email_boom(subject, body, **kw):
+        raise smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+
+    monkeypatch.setattr("scripts.check_allotment.send_telegram", telegram_boom)
+    monkeypatch.setattr("scripts.check_allotment.send_email", email_boom)
+    record = {"company_name": "Test Co", "registrar": "KFin"}
+    with pytest.raises(NotificationDeliveryError):
+        dispatch_allotment(record, dry_run=False)
+
+
+def test_dispatch_allotment_does_not_raise_when_both_unconfigured(monkeypatch) -> None:
+    monkeypatch.setattr("scripts.check_allotment.send_telegram", lambda text, **kw: False)
+    monkeypatch.setattr("scripts.check_allotment.send_email", lambda *a, **kw: False)
+    dispatch_allotment({"company_name": "Test Co"}, dry_run=False)
+
+
+def test_dispatch_pan_results_raises_when_all_profile_emails_fail(monkeypatch) -> None:
+    profiles = [
+        {"label": "Dad", "pan": "ABCDE1234F", "email": "dad@example.com"},
+        {"label": "Me", "pan": "PQRST5678G", "email": "me@example.com"},
+    ]
+
+    def email_boom(subject, body, to_addr=None, **kw):
+        raise smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+
+    monkeypatch.setattr("scripts.check_allotment.send_email", email_boom)
+    monkeypatch.setattr(
+        "scripts.check_allotment.checker_for_registrar",
+        lambda name: (lambda page, company, pan: {"status": "allotted", "shares": 100}),
+    )
+    record = {"company_name": "Test Co", "registrar": "KFin Technologies"}
+    with pytest.raises(NotificationDeliveryError):
+        dispatch_pan_results(record, profiles, page=object(), dry_run=False)
+
+
+def test_dispatch_pan_results_does_not_raise_when_one_email_succeeds(monkeypatch) -> None:
+    profiles = [
+        {"label": "Dad", "pan": "ABCDE1234F", "email": "dad@example.com"},
+        {"label": "Me", "pan": "PQRST5678G", "email": "me@example.com"},
+    ]
+    calls: list[str] = []
+
+    def mixed_email(subject, body, to_addr=None, **kw):
+        calls.append(to_addr or "")
+        if to_addr == "dad@example.com":
+            return True
+        raise smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+
+    telegrams: list[str] = []
+    monkeypatch.setattr("scripts.check_allotment.send_email", mixed_email)
+    monkeypatch.setattr(
+        "scripts.check_allotment.send_telegram",
+        lambda text, **kw: telegrams.append(text) or True,
+    )
+    monkeypatch.setattr(
+        "scripts.check_allotment.checker_for_registrar",
+        lambda name: (lambda page, company, pan: {"status": "not_allotted", "shares": None}),
+    )
+    record = {"company_name": "Test Co", "registrar": "KFin Technologies"}
+    out = dispatch_pan_results(record, profiles, page=object(), dry_run=False)
+    assert out["n_emailed"] == 1
+    assert len(telegrams) == 1
+    assert "1 emailed" in telegrams[0]
+
+
+def test_run_check_does_not_mark_notified_when_dispatch_fails(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "live_audit_log.csv"
+    write_audit(path, pd.DataFrame([_row()]))
+    monkeypatch.setattr(
+        "scripts.check_allotment.dispatch_allotment",
+        lambda rec, dry_run=False: (_ for _ in ()).throw(
+            NotificationDeliveryError("both channels down")
+        ),
+    )
+    with pytest.raises(NotificationDeliveryError):
+        run_check(
+            out_dir=tmp_path,
+            audit_path=path,
+            client=FakeClient(PUBLISHED_HTML),
+            as_of=date(2026, 8, 30),
+            profiles=[],
+        )
+    saved = read_audit(path)
+    assert str(saved.iloc[0]["allotment_notified"]).strip().lower() not in {"true", "1", "yes"}
+
+    # Retry after fixing credentials should still attempt dispatch.
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "scripts.check_allotment.dispatch_allotment",
+        lambda rec, dry_run=False: sent.append(rec["company_name"]),
+    )
+    first = run_check(
+        out_dir=tmp_path,
+        audit_path=path,
+        client=FakeClient(PUBLISHED_HTML),
+        as_of=date(2026, 8, 30),
+        profiles=[],
+    )
+    assert sent == ["Test Co"]
+    assert [r["company_name"] for r in first] == ["Test Co"]
 

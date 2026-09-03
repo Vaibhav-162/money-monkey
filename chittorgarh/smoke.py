@@ -1,4 +1,52 @@
-"""End-to-end smoke test for Lohia Corp (ipo_id=2574)."""
+"""End-to-end smoke test for Lohia Corp (ipo_id=2574).
+
+WHAT THIS FILE DOES
+--------------------
+A "smoke test" here means a fast live sanity check against one known real
+IPO, not a unit test. `scrape_ipos.py --smoke` is the only production caller
+of `run_smoke()`; `tests/test_smoke_e2e.py` calls it too. `tests/test_parse_lohia.py`
+reuses `check_golden` / `print_results` against a saved HTML fixture. This
+file calls `pipeline.run_pipeline` (full scrape of that one id, including
+GMP) and `export.read_master` to re-read the CSV it just wrote. Default
+output is a temp folder that is deleted afterwards — it does not pollute
+`data/`.
+
+KEY TERMS USED HERE
+--------------------
+- Smoke test: a live end-to-end run against one known IPO (Lohia Corp,
+  Chittorgarh id 2574, mainboard, listed 2026) to catch parser/site drift.
+- Mainline / mainboard: the primary NSE/BSE listing tier, as opposed to SME
+  (smaller companies, different rules). Lohia is mainboard.
+- Issue price: the final rupee price at which the IPO was sold (₹425 here).
+- OFS (Offer For Sale): existing shareholders selling their shares, not new
+  company capital. Golden checks that `sale_type` contains "OFS".
+- Subscription multiple (`sub_*_x`): how many times the reserved shares were
+  applied for, by category (QIB / NII / retail / total). Chittorgarh's
+  "Total x" is what this golden expects.
+- GMP (Grey Market Premium): unofficial pre-listing premium in rupees over
+  issue price. Asserted only when `require_gmp=True` (the live smoke path).
+- Registrar: the firm that runs the allotment lottery (golden expects
+  "MUFG Intime").
+- Crore: 10 million rupees. `issue_size_cr` is the issue size in crore.
+- `current_price` is deliberately NOT asserted — it moves with the market.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `GOLDEN`: stable field values copied from the live Lohia page; the
+  contract the parser must still satisfy.
+- `close_enough(actual, expected, rel, abs_tol)` / `_num(value)`: numeric
+  compare that tolerates comma-formatted strings and tiny float drift.
+- `check_golden(master, sats, require_gmp)`: runs the field-by-field checks
+  and returns `(name, ok, detail)` tuples. Extra FY/listing/GMP asserts
+  only run when `sats is not None`.
+- `print_results(results)`: prints PASS/FAIL and returns True if all passed.
+- `run_smoke(out_dir, headed)`: public entry. Temp dir + cleanup unless the
+  caller passes `out_dir`. Return code 0/1 for the CLI.
+- `_run_smoke(out_dir, headed)`: scrapes Lohia, checks `ipos.csv` has the
+  two-row group header, checks `ipos.xlsx` exists, asserts no leftover
+  satellite CSVs, and copies cache HTML into `tests/fixtures/lohia_2574.html`
+  the first time so offline parser tests have a fixture.
+"""
 
 from __future__ import annotations
 

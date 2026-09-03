@@ -1,4 +1,60 @@
-"""One master IPO sheet with grouped headers (group row + subcolumn row)."""
+"""One master IPO sheet with grouped headers (group row + subcolumn row).
+
+WHAT THIS FILE DOES
+--------------------
+Owns the on-disk shape of the historical dataset: `ipos.csv` (source of
+truth) and `ipos.xlsx` (the same table for Excel). Both files have two
+header rows — a group title (`Identity`, `GMP at close`, …) then a
+subcolumn label — so `read_master` skips two rows and binds columns by
+position (labels like `Period` / `Open` repeat). `pipeline.py` is the main
+writer (`append_master`, `flatten_into_master`, `load_done_ids`,
+`coverage_report`, `remove_legacy_outputs`). `scrape_ipos.py --rebuild-xlsx`
+and `smoke.py` call `rebuild_master_xlsx` / `read_master`. Downstream
+readers: `analysis/load.py`, `analysis/prices.py`, `scripts/fetch_prices.py`,
+`scripts/rescrape_gmp_history.py`. `shards.py` and the GMP rescrape use
+`append_or_replace` for non-master CSVs (`gmp_history.csv`, `failed.csv`).
+
+KEY TERMS USED HERE
+--------------------
+- Group header: row 1 of `ipos.csv` / `ipos.xlsx` starts with `Identity`.
+  The smoke test asserts this; a file without it is read as a plain CSV.
+- Satellite tables: per-IPO lists (financial years, listing-day BSE/NSE
+  OHLC, objects of issue, OFS sellers, GMP history). `flatten_into_master`
+  copies a bounded prefix of each onto the one master row so the sheet
+  stays one-row-per-IPO.
+- GMP at close: the grey-market snapshot columns (`gmp_rs`, `gmp_pct`, …)
+  plus `gmp_obs_count` (how many daily history rows were flattened).
+- OFS sellers: named existing shareholders selling in the Offer For Sale.
+- Crore (`Cr`): 10 million rupees — the unit on issue-size and FY columns.
+- Legacy outputs: the old many-CSV layout (`financials.csv`,
+  `subscription.csv`, even `gmp_history.csv`). `remove_legacy_outputs`
+  deletes those names at the start of a pipeline run so a fresh scrape
+  does not mix layouts. The durable GMP archive is rebuilt by
+  `scripts/rescrape_gmp_history.py` after that.
+- Locked file: OneDrive/Excel can hold `ipos.xlsx` open. Writes retry,
+  then fall back to `ipos.unlocked.xlsx` rather than crashing.
+
+FUNCTIONS / CLASSES IN THIS FILE
+---------------------------------
+- `COLUMN_GROUPS` / `FIELD_KEYS`: the ordered schema (group, field, label).
+- `flatten_into_master(master, sats)`: copy FY1–FY3, BSE/NSE OHLC, first
+  4 objects, first 3 OFS sellers, and GMP row-count onto the IPO dict.
+- `read_master(path)`: load `ipos.csv` whether or not the group header is
+  present; always return columns in `FIELD_KEYS` order.
+- `write_master_csv` / `write_master_xlsx`: write the two-row header plus
+  data. XLSX merges group cells and freezes the header.
+- `append_master(out_dir, rows)`: replace existing `ipo_id`s in `ipos.csv`
+  and rewrite. XLSX only if `write_xlsx=True` (pipeline rebuilds it in
+  batches via `rebuild_master_xlsx`).
+- `rebuild_master_xlsx(out_dir)`: CSV → XLSX without scraping.
+- `append_or_replace(path, rows, key)`: same replace-by-key for ordinary
+  CSVs (GMP history, failed rows).
+- `load_done_ids(path)`: `ipo_id` set for `--resume`.
+- `remove_legacy_outputs(out_dir)`: delete leftover satellite / tmp files.
+- `coverage_report(masters)`: fill-rate snapshot (subscription, PAT, GMP…).
+- `write_csv` / lock helpers (`_replace_or_fallback`, `_safe_to_csv`):
+  retry on PermissionError, then write a `.unlocked` sibling.
+"""
 
 from __future__ import annotations
 
