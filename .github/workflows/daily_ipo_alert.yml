@@ -1,23 +1,20 @@
 name: Daily IPO close-day alert
 
 on:
-  schedule:
-    # 3:15 PM IST (09:45 UTC) — hedge tick; GitHub Actions `schedule` runs on
-    # public repos are sometimes delayed several hours, especially right at
-    # the top of an hour. This gives an earlier chance to land on time.
-    - cron: "45 9 * * 1-5"
-    # 3:30 PM IST (10:00 UTC) — primary scan while the bidding window is still open.
-    - cron: "0 10 * * 1-5"
-    # 4:00 PM IST (10:30 UTC) — catch-up if GitHub dropped the 3:30 tick (presence-only).
-    - cron: "30 10 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Dry run: print cards only, do not write the audit log or send mail/Telegram. Uncheck to force a real send."
         type: boolean
         default: true
-  # External clock (cron-job.org POST /dispatches). Runs live, same as
-  # schedule — does not use workflow_dispatch.inputs.dry_run.
+  # External clock only (cron-job.org POST to /dispatches, ~3:30 PM IST
+  # weekdays). This is the ONLY automatic trigger for this workflow —
+  # GitHub's internal `schedule` trigger was removed because public-repo
+  # schedule ticks were unreliable (multi-hour delays, dropped ticks).
+  # There is now no automatic backup: if cron-job.org itself misses this
+  # POST, nothing runs until a human notices and clicks "Run workflow"
+  # with dry_run unchecked. This trigger always runs live; it ignores
+  # workflow_dispatch's dry_run input.
   repository_dispatch:
     types: [trigger-daily-ipo-alert]
 

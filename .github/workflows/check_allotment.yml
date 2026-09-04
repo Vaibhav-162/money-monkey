@@ -1,14 +1,22 @@
 name: Check IPO allotment status
 
 on:
-  schedule:
-    - cron: "30 6 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Dry run: print results only, do not write the audit log or send mail/Telegram. Uncheck to force a real send."
         type: boolean
         default: true
+  # External clock only (cron-job.org POST to /dispatches, ~12:00 PM IST
+  # weekdays). This is the ONLY automatic trigger for this workflow —
+  # GitHub's internal `schedule` trigger was removed because public-repo
+  # schedule ticks were unreliable (multi-hour delays, dropped ticks).
+  # There is now no automatic backup: if cron-job.org itself misses this
+  # POST, nothing runs until a human notices and clicks "Run workflow"
+  # with dry_run unchecked. This trigger always runs live; it ignores
+  # workflow_dispatch's dry_run input.
+  repository_dispatch:
+    types: [trigger-check-allotment]
 
 permissions:
   contents: write

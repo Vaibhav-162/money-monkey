@@ -250,13 +250,16 @@ def test_run_scan_skips_dispatch_when_row_already_exists(monkeypatch, tmp_path: 
     assert dispatched[0][0]["ipo_id"] == "9999"
 
 
-def test_daily_alert_cron_is_inside_bidding_window() -> None:
+def test_daily_alert_has_no_github_schedule() -> None:
     text = Path(".github/workflows/daily_ipo_alert.yml").read_text(encoding="utf-8")
-    assert 'cron: "45 9 * * 1-5"' in text
-    assert 'cron: "0 10 * * 1-5"' in text
-    assert 'cron: "30 10 * * 1-5"' in text
-    assert "50 9" not in text
-    assert "12 * * 1-5" not in text
+    assert "schedule:" not in text
+    assert 'cron: "45 9 * * 1-5"' not in text
+    assert 'cron: "0 10 * * 1-5"' not in text
+    assert 'cron: "30 10 * * 1-5"' not in text
+    assert "repository_dispatch:" in text
+    assert "types: [trigger-daily-ipo-alert]" in text
+    assert "workflow_dispatch:" in text
+    assert "dry_run:" in text
 
 
 def test_daily_alert_manual_dispatch_defaults_to_dry_run() -> None:

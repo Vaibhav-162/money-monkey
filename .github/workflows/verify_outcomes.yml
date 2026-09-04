@@ -1,9 +1,17 @@
 name: Verify IPO listing outcomes
 
 on:
-  schedule:
-    - cron: "15 4 * * 1-5"
   workflow_dispatch:
+  # External clock only (cron-job.org POST to /dispatches, ~9:45 AM IST
+  # weekdays). This is the ONLY automatic trigger for this workflow —
+  # GitHub's internal `schedule` trigger was removed because public-repo
+  # schedule ticks were unreliable (multi-hour delays, dropped ticks).
+  # There is now no automatic backup: if cron-job.org itself misses this
+  # POST, nothing runs until a human notices and clicks "Run workflow".
+  # This job never sends alerts (it only fills listing-day outcomes), so
+  # there is no dry_run input.
+  repository_dispatch:
+    types: [trigger-verify-outcomes]
 
 permissions:
   contents: write

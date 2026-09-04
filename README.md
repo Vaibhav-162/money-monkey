@@ -126,50 +126,65 @@ python -m chittorgarh.live_dashboard
 python scripts/live_scanner.py --dry-run --include-open
 ```
 
-Weekday crons run on **`main` only** (UTC):
+None of the three live workflows has a GitHub Actions `schedule` trigger.
+Public-repo `schedule` ticks were unreliable (multi-hour delays, dropped
+ticks), so they were removed. Each workflow fires automatically **only**
+when cron-job.org POSTs `repository_dispatch` (and `workflow_dispatch` is
+the only manual fallback). If cron-job.org misses a POST, **nothing
+runs** until a human notices and clicks **Run workflow** — there is no
+in-window GitHub backup (the old 3:15 PM hedge and 4:00 PM catch-up
+ticks are gone). Configure **all three** as separate cron-job.org jobs,
+not just the daily alert, and turn on cron-job.org's own
+failure-notification email. Dispatches run workflows on **`main` only**.
 
-- `45 9 * * 1-5` = **3:15 PM IST** hedge tick. GitHub Actions `schedule`
-  events on a public repo can still delay any of the three ticks by hours
-  (known platform behavior, not a timezone bug); the hedge reduces — not
-  eliminates — the chance of a very late first email.
-- `0 10 * * 1-5` = **3:30 PM IST** primary close-day scan (still inside the
-  bidding window; most broker UPI cutoffs are 4:00–4:30 PM IST).
-- `30 10 * * 1-5` = **4:00 PM IST** catch-up. Whichever of the three ticks
-  first writes an audit row for a given `(ipo_id, close_date)` sends the
-  one email for that IPO that day; later ticks that day are silent for
-  that key even if GMP/Sub moved a lot, so three crons cannot cause three
-  emails for the same IPO. Failure alerts (Telegram+email) fire at
-  most once per IST calendar day, persisted in `data/live_alert_state.json`
-  which the workflow commits even when the scan step fails.
-- External **3:30 PM IST** weekday POST (cron-job.org →
-  `repository_dispatch` type `trigger-daily-ipo-alert`) is the on-time
-  clock; GitHub's three `schedule` ticks stay as delayed backup. Same
-  presence-only gate, so both clocks cannot send two emails for one IPO.
-  That dispatch is a **live** send (not the UI dry-run). The PAT lives
-  only in cron-job.org (fine-grained, this repo, Contents read/write) —
-  never commit it. HTTP 204 means GitHub accepted the webhook; confirm
-  Actions shows event `repository_dispatch`. URL:
-  `https://api.github.com/repos/Vaibhav-162/money-monkey/dispatches`.
-- `15 4 * * 1-5` = 9:45 AM IST listing-day verification.
-- `30 6 * * 1-5` = 12:00 PM IST allotment-out check.
+Weekday clocks (same IST times as the old GitHub crons; only the trigger
+changed):
 
-You do **not** need to click Run every weekday. If Actions shows no
-**Scheduled** or **repository_dispatch** run of *Daily IPO close-day
-alert* by ~3:35 PM IST, the external clock and GitHub both missed —
-click **Run workflow** on **`main`** with dry_run **unchecked**
-immediately (a next-day retry is too late to bid). SMTP 535 / quoted
-Windows secrets are a separate email-login problem; they do not explain a
-missing schedule.
+- **3:30 PM IST (10:00 UTC)** — *Daily IPO close-day alert*,
+  `event_type` `trigger-daily-ipo-alert`. Close-day scan while the
+  bidding window is still open (most broker UPI cutoffs are 4:00–4:30 PM
+  IST). Presence-only gate: the first real write of an audit row for a
+  given `(ipo_id, close_date)` sends the one email for that IPO that
+  day; a later run that day (duplicate POST or a manual live retry) is
+  silent for that key even if GMP/Sub moved a lot. Failure alerts
+  (Telegram+email) fire at most once per IST calendar day, persisted in
+  `data/live_alert_state.json` which the workflow commits even when the
+  scan step fails. The dispatch is a **live** send (not the UI dry-run).
+- **9:45 AM IST (04:15 UTC)** — *Verify IPO listing outcomes*,
+  `event_type` `trigger-verify-outcomes`. Fills listing-day actuals; does
+  not send alerts.
+- **12:00 PM IST (06:30 UTC)** — *Check IPO allotment status*,
+  `event_type` `trigger-check-allotment`. Allotment-out check. Also a
+  **live** send (not the UI dry-run).
+
+The PAT lives only in cron-job.org (fine-grained, this repo, Contents
+read/write) — never commit it. Reuse the same PAT for all three jobs.
+HTTP 204 means GitHub accepted the webhook; confirm Actions shows event
+`repository_dispatch`. URL:
+`https://api.github.com/repos/Vaibhav-162/money-monkey/dispatches`.
+Each job is `POST` with headers `Accept: application/vnd.github+json`
+and `Authorization: Bearer <PAT>`, and JSON body
+`{"event_type": "<type above>"}`.
+
+You do **not** need to click Run every weekday **if** all three
+cron-job.org jobs are healthy. If Actions shows no `repository_dispatch`
+run of *Daily IPO close-day alert* by ~3:35 PM IST, the external clock
+missed — click **Run workflow** on **`main`** with dry_run **unchecked**
+immediately (a next-day retry is too late to bid). Same idea for the
+morning verify (~9:50 AM IST) and noon allotment (~12:05 PM IST) jobs,
+except verify has no dry_run checkbox. SMTP 535 / quoted Windows secrets
+are a separate email-login problem; they do not explain a missing run.
 
 **Manual "Run workflow" clicks default to a dry run.** Both
 `daily_ipo_alert.yml` and `check_allotment.yml` expose a `dry_run`
 checkbox (default **checked**) on `workflow_dispatch`: it prints results
 but never writes the audit log or sends mail/Telegram, so ad-hoc testing
 can never consume the one-alert-per-IPO-per-day slot that a real
-scheduled tick would otherwise use later that day. **Uncheck the box**
-when you actually need a real backup send (e.g. a dropped 3:30/4:00 PM
-tick) — scheduled `cron` runs and cron-job.org `repository_dispatch`
-always ignore this input and send for real.
+cron-job.org tick would otherwise use later that day. **Uncheck the box**
+when you actually need a real backup send (e.g. a missed 3:30 PM POST)
+— cron-job.org `repository_dispatch` always ignores this input and sends
+for real. `verify_outcomes.yml` has a bare `workflow_dispatch` (no
+inputs) because that job never sends alerts.
 
 Repo setup: Settings → Actions → General → Workflow permissions →
 **Read and write**. Add secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`

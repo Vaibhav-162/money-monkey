@@ -375,6 +375,14 @@ def test_allotment_manual_dispatch_defaults_to_dry_run() -> None:
     assert "github.event_name == 'workflow_dispatch' && inputs.dry_run" in text
 
 
+def test_allotment_has_no_github_schedule() -> None:
+    text = Path(".github/workflows/check_allotment.yml").read_text(encoding="utf-8")
+    assert "schedule:" not in text
+    assert 'cron: "30 6 * * 1-5"' not in text
+    assert "repository_dispatch:" in text
+    assert "types: [trigger-check-allotment]" in text
+
+
 def test_dispatch_allotment_raises_when_telegram_and_email_both_fail(monkeypatch) -> None:
     def telegram_boom(text, **kw):
         raise RuntimeError("telegram down")

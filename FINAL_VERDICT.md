@@ -16,7 +16,9 @@ its best-looking numbers (SME) are almost certainly a mirage caused by which SME
 have price data available, not genuine skill.
 
 **Bottom line for real money:** use Strategy 1 as a *ranking/filter tool with a human sanity
-check*, not an auto-pilot. Do not act on Strategy 2's numbers as-is.
+check*, not an auto-pilot. Do not act on Strategy 2's numbers as-is. And a ranking that never
+arrives is worth zero — the live delivery pipeline is a separate question, previously broken,
+now honest-when-it-fails but no longer redundant. See §6.
 
 ---
 
@@ -201,9 +203,169 @@ This is a legitimate, honestly-validated **short-term (listing-day) tool** sitti
 knowing *which half* to trust is exactly the value of having done this analysis properly instead
 of trusting the "friend rules" at face value.
 
+That ranking still has to *reach you* on close day, before typical 4:00–4:30 PM IST broker
+cutoffs. That is a pipeline question, not a model question. See §6.
+
 ---
 
-## 6. If you want to keep improving this
+## 6. Is the live delivery pipeline itself trustworthy?
+
+Sections 1–5 answered a statistical question: is Strategy 1 / Strategy 2 a good predictor.
+This section answers a different one: **does a good prediction actually reach a human in time
+to act on it.** Both must be true for this system to be useful for real money. A great model
+with a broken alert pipeline is worthless. A perfectly reliable pipeline delivering a bad
+model's picks is also worthless. Strategy 2 already fails the first test (§3, §5). The rest of
+this section is about whether Strategy 1 can clear the second.
+
+The walk-forward backtest never sent a Telegram. It never raced a 4:00 PM IST UPI cutoff. It
+never depended on GitHub Actions, a PAT, or cron-job.org. **Passing the backtest does not imply
+the production bot works.**
+
+### What was found broken, and what was fixed
+
+The first production deployment had a silent total failure: GitHub Actions runs went **green**
+(no error shown) while delivering neither Telegram nor email. Notification-send exceptions were
+caught and swallowed. A dead Gmail app password or a bad Telegram token looked exactly like a
+healthy weekday with nothing to report.
+
+Two code fixes closed that class of bug:
+
+1. **`NotificationDeliveryError`** (in `scripts/notify.py`, wired into `scripts/live_scanner.py`
+   and `scripts/check_allotment.py`) now fails the workflow **loudly** when a real (non-dry)
+   batch loses every attempted channel — zero Telegram delivered, and email also throwing. A
+   red Actions run is the alarm. Unconfigured secrets still return a silent no-op
+   (`send_telegram` / `send_email` return `False` without raising); that is intentional for a
+   Telegram-only or email-only setup, and it is also a remaining trap if *both* channels were
+   never configured in the first place.
+2. **`upsert_audit()` now runs after the send.** The presence-only gate treats any existing
+   `(ipo_id, close_date)` row as "already alerted." Writing the row *before* a failed send used
+   to consume the day's one slot, so a credentials fix could not retry. Same ordering on the
+   allotment checker: `allotment_notified` is set only after dispatch returns. A failed send
+   now leaves the slot open.
+
+Partial delivery (Telegram worked, email threw) still exits 0. That is by design — one channel
+got through — but it means a dead Gmail login will not paint the daily-alert job red if
+Telegram is healthy.
+
+### The cron finding, the fix, and the tradeoff
+
+GitHub Actions' internal `schedule` trigger, previously used by all three workflows, was
+independently found to be unreliable on this public repo: ticks ran hours later than
+scheduled, or were dropped entirely, sometimes for days. For a 3:30 PM IST close-day card that
+has to land before typical 4:00–4:30 PM IST broker UPI cutoffs (and is worthless after the
+5:00 PM exchange close), a 7 PM "backup" is not a backup.
+
+The fix: **all three workflows are now triggered only by an external cron-job.org
+`repository_dispatch` POST** (fine-grained PAT, Contents read/write on this repo only, never
+committed). `workflow_dispatch` remains as the manual-only fallback. There is **no automatic
+backup** if that one POST is missed — expired PAT, cron-job.org outage, misconfigured job, or
+a typo in the event type.
+
+| Job | What a miss costs | Old automatic triggers | New automatic triggers |
+| --- | --- | --- | --- |
+| Daily close-day alert (`live_scanner.py`) | That IPO's bid window is gone | 3 GitHub `schedule` ticks (3:15 / 3:30 / 4:00 IST) plus 1 external POST | Exactly 1 external POST |
+| Allotment check (`check_allotment.py`) | One weekday of delay; the 1–4 day post-close window can still catch it tomorrow | 1 GitHub `schedule` (12:00 IST) | Exactly 1 external POST |
+| Listing-outcome verify (`verify_outcomes.py`) | Forward-test ledger lags a day; no money decision | 1 GitHub `schedule` (09:45 IST) | Exactly 1 external POST |
+
+This trades **"internally redundant but individually unreliable"** (three GitHub ticks for the
+daily alert alone, any one of which might fire hours late or not at all, but with three
+chances) for **"individually more punctual but a single point of failure"** (exactly one
+automatic trigger, zero automatic retry).
+
+**Is the trade worth it?** For the close-day job, yes — with eyes open. Punctuality *is* the
+product. Three clocks that independently arrive after the cutoff were never three chances at a
+usable alert; they were three chances at a post-mortem. One clock that actually fires at
+3:30 PM IST is the correct primary.
+
+It is a worse trade than it needed to be. Allotment and verify are not racing a 60-minute
+window; dropping their GitHub `schedule` was consistency, not necessity. And even on the
+close-day job, **a rare late alert still beats a silent total miss** — you at least know an
+IPO closed today, instead of reading silence as "nothing to do." The honest de-risking is not
+"trust cron-job.org." It is:
+
+- Turn on cron-job.org's own failure-notification email so a missed POST is visible without
+  opening GitHub.
+- Watch the Actions tab / your inbox during the 3:30–4:00 PM IST window on weekdays. No run by
+  ~3:35 PM IST means click **Run workflow** on `main` with `dry_run` **unchecked**. A next-day
+  retry cannot bid.
+- Optionally restore **one** deliberately low-frequency GitHub `schedule` tick per workflow as
+  a last-resort safety net, even knowing it is individually unreliable. The presence-only gate
+  already prevents a double-send if the external POST already succeeded. That is the design
+  this repo almost had, before the GitHub ticks were removed entirely. **I would put one back
+  on the close-day job.** The current "external only" choice over-corrected.
+
+### Fewer triggers does not mean weaker gating
+
+`records_needing_alert()` allows **exactly one alert per `(ipo_id, close_date)`**, no matter
+how many attempts happen that day. It is a presence check, not a field-level diff: the first
+real write of the day is the one send; later ticks are silent even if GMP/Sub moved.
+
+Going from "up to 4 automatic trigger attempts/day" down to "exactly 1" does **not** change
+that correctness. It only changes how much redundancy protects against a single miss. Do not
+conflate "fewer triggers" with "less safe gating logic." The gate is the same. The spare
+attempts are gone.
+
+Manual `workflow_dispatch` defaults to `--dry-run` so an off-hours test cannot burn that one
+slot. Recovering a real miss requires unchecking `dry_run`. A dispatch from cron-job.org is
+always live.
+
+### A red allotment run is an alarm, not a bug
+
+`raise_if_systematic_lookup_failure` (in `chittorgarh/registrar_allotment.py`, wired into
+`scripts/check_allotment.py`) escalates when **every** PAN lookup in a batch failed (2+
+attempts, zero resolved answers — allotted / not-allotted / no-application). A single captcha
+miss is normal OCR noise. The same failure on every profile is a strong signal that the
+registrar page, the captcha widget, or Tesseract itself broke — not that every applicant
+happened to fat-finger the captcha.
+
+A red workflow run here is **deliberately the alarm**. Do not "fix" it by catching the
+exception so the job goes green. Unsupported registrars and an empty `PAN_PROFILES` list do
+not escalate (nothing was attempted).
+
+### Is this safe to rely on for real money, today?
+
+**No, not as a fire-and-forget bot. Yes, as a ranking tool whose delivery you personally watch
+during the close-day window.**
+
+The silent-green-run class of bugs is fixed. The remaining failure mode is a **missed
+trigger**, which is visible in the Actions tab if someone looks, and invisible if nobody does.
+That is a better class of failure than fake success — but only with a human in the loop.
+
+Pipeline checklist (this is *in addition to* the Strategy 1/2 statistical guardrails in §5):
+
+| Check | If this is not true |
+| --- | --- |
+| All **three** cron-job.org jobs are configured and actually firing — daily alert, allotment check, *and* outcome verify — not just the 3:30 PM one | Allotment pings and the live paper-trade ledger die silently while close-day cards still look healthy |
+| cron-job.org's own failure-alert email is on | The new single clock can fail with nobody notified except GitHub, which you are not watching |
+| The PAT is unexpired, fine-grained, Contents read/write on **this repo only** | Every automatic run stops on the same day. There is no GitHub `schedule` left to catch it |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` **and** Gmail (`GMAIL_USER` + app password, plus `ALERT_EMAIL_TO` if the digest should reach more than the sender) are both set | One channel's outage equals total silence. Unset secrets are still a green no-op |
+| Someone looks at Actions / Telegram / email around 3:30–4:00 PM IST on weekdays | A genuine double-miss (external POST failed, and you didn't notice) is a lost bid with no retry |
+| Recovering a miss uses **Run workflow** on `main` with `dry_run` unchecked | Default manual runs print cards and send nothing, while looking like you "ran it" |
+| `data/analysis/models/*.pkl` are committed | The scanner still sends cards, but Strategy 1 silently degrades to `SKIP` / no `p_pop` |
+| Actions has **Read and write** contents permission | Audit CSV cannot be committed; retries and allotment flags drift |
+
+Residual risk that remains after every fix above:
+
+- The clock is now one POST. Expired PAT, cron-job.org outage, or a misconfigured job is a
+  total automatic miss. That was a deliberate trade. It is not theoretical.
+- HTML changes on Chittorgarh or InvestorGain still break discovery / GMP. Zero rows on
+  *both* boards fires `send_failure_alert()`; zero closers *today* is a silent no-op
+  (correct). A site break that still returns rows with empty fields is a fuzzier failure.
+- Registrar captcha OCR is best-effort. Individual misses stay silent; only a full-batch wipe
+  goes red.
+- The pipeline will faithfully deliver Strategy 2 hold/flip copy. That copy should still be
+  ignored (§5).
+- Cards are mid-afternoon snapshots. GMP and subscription can still move in the last hour.
+  The bot is not the 6 PM print.
+
+**Bottom line for the pipeline:** do not confuse "the model has an edge" with "the bot will
+text me in time." The delivery path is now honest when it fails to send, and punctual when the
+external clock fires. It is not redundant. Treat a quiet 3:35 PM IST as a possible outage, not
+as "no IPO today."
+
+---
+
+## 7. If you want to keep improving this
 
 1. **Track live predictions going forward.** Every time you score a real IPO, save the
    prediction and check the actual outcome later. This builds a leak-free, real-time-GMP
@@ -215,3 +377,6 @@ of trusting the "friend rules" at face value.
    blocker, not the modeling code.
 4. **Re-run `run_analysis.py` yearly** as more IPOs mature, so the walk-forward folds keep
    growing and the year-to-year noise (especially on Mainboard) settles down.
+5. **De-risk the live clock.** Turn on cron-job.org's failure emails for all three jobs.
+   Consider putting back one low-frequency GitHub `schedule` tick on the close-day workflow as
+   a last-resort safety net — a late alert beats a silent miss. See §6.
