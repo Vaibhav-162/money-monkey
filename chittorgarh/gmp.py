@@ -53,8 +53,10 @@ FUNCTIONS / CLASSES IN THIS FILE
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
@@ -109,6 +111,46 @@ def _subscription_header_index(header: list[str]) -> Optional[int]:
     return None
 
 
+_MON = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _parse_gmp_date_cell(raw: str) -> Optional[str]:
+    """ISO date from a GMP DATE cell.
+
+    InvestorGain now prints ``25-Sep 18:37`` (no year), sometimes with
+    ``Sub: 176.85x`` on the same cell. ``parse_date`` still handles the
+    older ``30-07-2026`` / ``31-08-2026 Close`` forms.
+    """
+    text = clean_text(raw)
+    if not text:
+        return None
+    head = re.split(r"\bSub:", text, maxsplit=1, flags=re.I)[0].strip()
+    iso = parse_date(head.split()[0] if head else "") or parse_date(head)
+    if iso:
+        return iso
+    match = re.match(r"(\d{1,2})[-\s]([A-Za-z]{3})", head)
+    if not match:
+        return None
+    day = int(match.group(1))
+    month = _MON.get(match.group(2).lower())
+    if not month:
+        return None
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    try:
+        candidate = date(today.year, month, day)
+    except ValueError:
+        return None
+    if candidate > today + timedelta(days=14):
+        try:
+            candidate = date(today.year - 1, month, day)
+        except ValueError:
+            return None
+    return candidate.isoformat()
+
+
 def _parse_gmp_rows(rows: list[list[str]], ipo_id: str) -> list[dict[str, Any]]:
     if not rows:
         return []
@@ -129,12 +171,12 @@ def _parse_gmp_rows(rows: list[list[str]], ipo_id: str) -> list[dict[str, Any]]:
         date_raw = row[date_i] if date_i < len(row) else ""
         if not date_raw or date_raw.lower() in {"date", "total", "gmp date"}:
             continue
-        date_token = date_raw.split()[0] if date_raw else ""
+        gmp_cell = row[gmp_i] if gmp_i is not None and gmp_i < len(row) else None
         rec = {
             "ipo_id": ipo_id,
-            "gmp_date": parse_date(date_token) or parse_date(date_raw),
+            "gmp_date": _parse_gmp_date_cell(date_raw),
             "gmp_date_raw": clean_text(date_raw),
-            "gmp_rs": parse_number(row[gmp_i] if gmp_i is not None and gmp_i < len(row) else None),
+            "gmp_rs": parse_number(gmp_cell),
             "gmp_pct": parse_number(row[pct_i] if pct_i is not None and pct_i < len(row) else None),
             "gmp_est_listing_price": parse_number(row[est_i] if est_i is not None and est_i < len(row) else None),
             "kostak_rs": parse_number(row[kostak_i] if kostak_i is not None and kostak_i < len(row) else None),
@@ -142,6 +184,14 @@ def _parse_gmp_rows(rows: list[list[str]], ipo_id: str) -> list[dict[str, Any]]:
             "sub_ig_x": parse_number(row[sub_ig_i] if sub_ig_i is not None and sub_ig_i < len(row) else None),
             "gmp_last_updated": clean_text(row[updated_i]) if updated_i is not None and updated_i < len(row) else None,
         }
+        if rec["sub_ig_x"] is None:
+            embedded = re.search(r"Sub:\s*([\d.]+)", date_raw, flags=re.I)
+            if embedded:
+                rec["sub_ig_x"] = parse_number(embedded.group(1))
+        if rec["gmp_pct"] is None and gmp_cell:
+            pct = re.search(r"\(([\d.]+)\s*%\)", str(gmp_cell))
+            if pct:
+                rec["gmp_pct"] = parse_number(pct.group(1))
         if rec["gmp_date"] or rec["gmp_rs"] is not None:
             out.append(rec)
     return out
@@ -215,7 +265,7 @@ def _scrape_gmp_page(page: Page, url: str, ipo_id: str, timeout_ms: int) -> list
         pass
     page.wait_for_timeout(1500)
     if "ipo-gmp-live" in page.url.lower() or "/report/ipo-gmp-live" in page.url.lower():
-        return []
+        raise RuntimeError(f"gmp redirected to {page.url}")
     for table in page.locator("table").all():
         rows: list[list[str]] = []
         for tr in table.locator("tr").all():

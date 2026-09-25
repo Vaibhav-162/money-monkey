@@ -299,6 +299,8 @@ def _fmt_gmp_hype(record: dict[str, Any]) -> str:
     asof = _fmt_gmp_asof(record)
     src = "InvestorGain, as of " + asof if asof else "InvestorGain"
     if gmp == "not available":
+        if "gmp_error" in str(record.get("error") or ""):
+            return f"InvestorGain GMP fetch failed ({src}). Treat the premium as unknown, not as a confirmed absence."
         return f"Grey Market Premium is currently not available ({src})."
     return f"Grey Market Premium is currently {gmp} ({src})."
 
@@ -657,32 +659,66 @@ def send_email(
     return True
 
 
-def send_failure_alert(error: str, state_path: Optional[Path] = None) -> None:
+# Breakage mail always includes this address. Daily apply/skip cards do not.
+MAINTAINER_EMAIL = "vs112698@gmail.com"
+
+
+def _failure_recipients() -> str:
+    recipients = _split_recipients(_env("ALERT_EMAIL_TO"))
+    if not recipients:
+        user = _env("GMAIL_USER")
+        recipients = [user] if user else []
+    if MAINTAINER_EMAIL not in recipients:
+        recipients.append(MAINTAINER_EMAIL)
+    return ", ".join(recipients)
+
+
+def send_failure_alert(
+    error: str,
+    state_path: Optional[Path] = None,
+    *,
+    kind: str = "crash",
+) -> None:
     path = state_path if state_path is not None else Path("data") / "live_alert_state.json"
     today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    payload: dict[str, Any] = {}
     if path.exists():
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
         except Exception:
             payload = {}
-        if isinstance(payload, dict) and payload.get("failure_alerted_ist") == today:
-            print("[notify] failure alert already sent today; skipping Telegram/email")
-            return
+    alerted = payload.get("failure_alerted")
+    if not isinstance(alerted, dict):
+        alerted = {}
+    if payload.get("failure_alerted_ist") and "crash" not in alerted:
+        alerted["crash"] = payload["failure_alerted_ist"]
+    if alerted.get(kind) == today:
+        print(f"[notify] failure alert kind={kind} already sent today; skipping")
+        return
 
     snippet = error[:1500]
-    html_body = f"⚠️ <b>IPO live scanner FAILED</b>\n<code>{_esc(snippet)}</code>"
+    html_body = f"⚠️ <b>IPO live job FAILED ({_esc(kind)})</b>\n<code>{_esc(snippet)}</code>"
     try:
         send_telegram(html_body)
     except Exception as exc:
         print(f"[notify] failure Telegram also failed: {_redact(str(exc))}")
     try:
-        send_email("IPO live scanner FAILED", format_email_digest([html_body]))
+        send_email(
+            f"IPO live job FAILED ({kind})",
+            format_email_digest([html_body]),
+            to_addr=_failure_recipients(),
+        )
     except Exception as exc:
         print(f"[notify] failure email also failed: {_redact(str(exc))}")
 
+    alerted[kind] = today
+    payload["failure_alerted"] = alerted
+    payload["failure_alerted_ist"] = alerted.get("crash", "")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"failure_alerted_ist": today}), encoding="utf-8")
+        path.write_text(json.dumps(payload), encoding="utf-8")
     except Exception as exc:
         print(f"[notify] could not write failure-alert state: {_redact(str(exc))}")
 

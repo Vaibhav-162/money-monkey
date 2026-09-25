@@ -156,6 +156,7 @@ AUDIT_COLUMNS = [
     "verified_at",
     "allotment_notified",
     "allotment_notified_at",
+    "gmp_backfilled",
 ]
 
 _MONTHS = (
@@ -240,6 +241,18 @@ def to_score_row(master: dict[str, Any], close_date: str | None = None) -> dict[
     return row
 
 
+def _gmp_warning(master: dict[str, Any]) -> str | None:
+    """Surface a swallowed GMP failure onto the audit row. A real scrape/score error wins."""
+    warnings = str(master.get("parse_warnings") or "")
+    if "gmp_error" not in warnings:
+        return None
+    for part in warnings.split(";"):
+        part = part.strip()
+        if part.startswith("gmp_error"):
+            return part[:500]
+    return None
+
+
 def build_alert_record(
     master: dict[str, Any],
     score: dict[str, Any] | None,
@@ -273,7 +286,8 @@ def build_alert_record(
             "registrar": master.get("registrar"),
             "listing_date_expected": _iso(master.get("listing_date")),
             "allotment_date": _iso(master.get("allotment_date")),
-            "error": error,
+            "error": error or _gmp_warning(master),
+            "gmp_backfilled": master.get("gmp_backfilled") or False,
             "verified": False,
             "allotment_notified": False,
         }

@@ -59,6 +59,24 @@ def test_subscription_column_is_not_confused_with_sauda() -> None:
     assert sauda_only[0]["subject_to_sauda"] == 500
 
 
+def test_undated_investorgain_cell_gets_a_year_and_embedded_sub() -> None:
+    rows = [
+        ["GMP DATE", "GMP", "EST. LISTING PRICE", "EST. PROFIT", "TREND"],
+        ["25-Sep 18:37 Sub: 176.85x C", "₹47 (35.07%)", "₹181", "₹5,217", "Stable"],
+        ["21-Sep 23:37", "₹32 (23.88%)", "₹166", "₹3,552", "Stable"],
+    ]
+    parsed = _parse_gmp_rows(rows, "3007")
+    assert parsed[0]["gmp_date"] == "2026-09-25"
+    assert parsed[0]["gmp_rs"] == 47
+    assert parsed[0]["gmp_pct"] == 35.07
+    assert parsed[0]["sub_ig_x"] == 176.85
+    assert parsed[1]["gmp_date"] == "2026-09-21"
+    close = last_gmp_on_or_before(parsed, "2026-09-25")
+    assert close["gmp_rs"] == 47
+    earlier = last_gmp_on_or_before(parsed, "2026-09-21")
+    assert earlier["gmp_rs"] == 32
+
+
 def test_last_gmp_on_or_before_picks_close_day_row() -> None:
     history = [
         {"gmp_date": "2026-08-31", "gmp_rs": 70, "sub_ig_x": 97.92, "gmp_date_raw": "31-08-2026 Close"},

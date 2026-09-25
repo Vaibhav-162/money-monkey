@@ -383,6 +383,28 @@ def test_upsert_audit_tolerates_duplicate_keys_in_existing_file(tmp_path: Path) 
     assert set(out["ipo_id"].astype(str)) == {"2013", "9999"}
 
 
+def test_run_scan_does_not_alert_or_audit_when_every_gmp_is_blank(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+    monkeypatch.setattr(live_scanner, "send_failure_alert", lambda msg, **kw: calls.append((msg, kw.get("kind"))))
+    monkeypatch.setattr(live_scanner, "fetch_market_regime", lambda **k: "NEUTRAL")
+    dispatched: list[list] = []
+    monkeypatch.setattr(live_scanner, "dispatch", lambda records, dry_run=False: dispatched.append(list(records)))
+
+    def blank(client, discovery, **kwargs):
+        return build_alert_record({"company_name": discovery["company_name"]}, None, discovery)
+
+    monkeypatch.setattr(live_scanner, "_score_one", blank)
+    rows = [
+        {"ipo_id": "1", "company_name": "A", "exchange_type": "mainboard", "close_date": "2026-09-25", "status": "open", "url": "https://example.test/1"},
+        {"ipo_id": "2", "company_name": "B", "exchange_type": "sme", "close_date": "2026-09-25", "status": "open", "url": "https://example.test/2"},
+    ]
+    with pytest.raises(live_scanner.GmpSystemicMiss):
+        run_scan(rows=rows, as_of=date(2026, 9, 25), out_dir=tmp_path, fetch_gmp=True, dry_run=False)
+    assert dispatched == []
+    assert not (tmp_path / "live_audit_log.csv").exists()
+    assert calls and calls[0][1] == "gmp_miss"
+
+
 def test_run_scan_sends_failure_alert_on_empty_discovery(monkeypatch, tmp_path: Path) -> None:
     calls = []
     monkeypatch.setattr(live_scanner, "send_failure_alert", lambda msg, **kw: calls.append(msg))

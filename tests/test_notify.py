@@ -498,7 +498,27 @@ def test_send_failure_alert_dedupes_within_same_ist_day(tmp_path, monkeypatch) -
     assert state.exists()
     payload = json.loads(state.read_text(encoding="utf-8"))
     today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
-    assert payload["failure_alerted_ist"] == today
+    assert payload["failure_alerted"]["crash"] == today
+    assert emails[0][0].startswith("IPO live job FAILED")
+
+
+def test_failure_alert_different_kind_is_not_swallowed(tmp_path, monkeypatch) -> None:
+    telegrams: list[str] = []
+    recipients: list[str] = []
+    monkeypatch.setattr(
+        "scripts.notify.send_telegram", lambda text, **kw: telegrams.append(text) or True
+    )
+
+    def _email(subject, body, **kw):
+        recipients.append(kw.get("to_addr") or "")
+        return True
+
+    monkeypatch.setattr("scripts.notify.send_email", _email)
+    state = tmp_path / "live_alert_state.json"
+    send_failure_alert("scan boom", state_path=state, kind="crash")
+    send_failure_alert("gmp blank", state_path=state, kind="gmp_miss")
+    assert len(telegrams) == 2
+    assert all("vs112698@gmail.com" in addr for addr in recipients)
 
 
 def test_send_failure_alert_sends_again_on_new_ist_day(tmp_path, monkeypatch) -> None:

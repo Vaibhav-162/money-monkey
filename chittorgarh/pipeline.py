@@ -127,7 +127,11 @@ def scrape_one(
             master["parse_warnings"] = f"{warnings}; {extra}".strip("; ")
             gmp_history = []
         if gmp_history:
-            master.update(last_gmp_close(gmp_history, master.get("listing_date")))
+            stamped = last_gmp_close(gmp_history, master.get("listing_date"))
+            master.update(stamped)
+            if stamped.get("gmp_rs") is None:
+                warnings = master.get("parse_warnings") or ""
+                master["parse_warnings"] = f"{warnings}; gmp_error:no dated GMP row".strip("; ")
         else:
             warnings = master.get("parse_warnings") or ""
             if "gmp_error" not in warnings:

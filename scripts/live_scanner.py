@@ -115,6 +115,20 @@ from chittorgarh.pipeline import scrape_one
 from scripts.notify import dispatch, send_failure_alert
 
 
+class GmpSystemicMiss(RuntimeError):
+    """Every candidate in this run came back with no GMP. Do not alert or audit."""
+
+
+def _gmp_absent(rec: dict[str, Any]) -> bool:
+    value = rec.get("gmp_rs")
+    if value is None or str(value).strip() == "":
+        return True
+    try:
+        return float(value) != float(value)
+    except (TypeError, ValueError):
+        return True
+
+
 def _select_candidates(
     rows: list[dict[str, Any]],
     as_of: date,
@@ -239,6 +253,22 @@ def run_scan(
     records = rank_same_day_candidates(records)
     print(f"[scan] market_regime={regime} ranked={sum(1 for r in records if r.get('rank_of_day') is not None)}")
 
+    if (
+        fetch_gmp
+        and not dry_run
+        and len(records) >= 2
+        and all(_gmp_absent(rec) for rec in records)
+    ):
+        names = ", ".join(str(rec.get("company_name") or rec.get("ipo_id")) for rec in records)
+        msg = (
+            f"GMP blank for every candidate on {day.isoformat()} ({names}). "
+            "Cards were not sent and the audit log was not written, so a later "
+            "successful scrape can still alert."
+        )
+        print(f"[scan] {msg}", flush=True)
+        send_failure_alert(msg, state_path=out_dir / "live_alert_state.json", kind="gmp_miss")
+        raise GmpSystemicMiss(msg)
+
     audit_path = out_dir / "live_audit_log.csv"
     to_alert = records
     if write_audit and not dry_run:
@@ -284,6 +314,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             model_dir=model_dir,
         )
         return 0
+    except GmpSystemicMiss:
+        raise
     except Exception:
         send_failure_alert(
             traceback.format_exc(),
