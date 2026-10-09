@@ -1,11 +1,11 @@
 {
   "n_alerts": 95,
-  "n_verified": 82,
-  "n_apply_s1_verified": 20,
+  "n_verified": 91,
+  "n_apply_s1_verified": 22,
   "realized_precision_apply_s1": 0.5,
-  "mean_ev_predicted_apply_s1": 259.10688666044706,
-  "mean_realized_ev_proxy_apply_s1": 588.6632944401545,
-  "n_s2_pass_verified": 37,
-  "s2_pass_mean_open_return_pct": 26.33145311601398,
+  "mean_ev_predicted_apply_s1": 1057.1588266979923,
+  "mean_realized_ev_proxy_apply_s1": 691.1850738078921,
+  "n_s2_pass_verified": 40,
+  "s2_pass_mean_open_return_pct": 25.81536743590625,
   "note": "Live forward-test, not investment advice. S2 listing-day return is not the 6-month target."
 }
