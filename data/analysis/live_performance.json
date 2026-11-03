@@ -1,8 +1,8 @@
 {
-  "n_alerts": 114,
-  "n_verified": 107,
+  "n_alerts": 116,
+  "n_verified": 108,
   "n_apply_s1_verified": 29,
-  "realized_precision_apply_s1": 0.0,
+  "realized_precision_apply_s1": null,
   "mean_ev_predicted_apply_s1": 1070.746533940928,
   "mean_realized_ev_proxy_apply_s1": 299.9703144574979,
   "n_s2_pass_verified": 45,
