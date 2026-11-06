@@ -1,11 +1,11 @@
 {
   "n_alerts": 121,
-  "n_verified": 114,
+  "n_verified": 115,
   "n_apply_s1_verified": 30,
   "realized_precision_apply_s1": null,
   "mean_ev_predicted_apply_s1": 1037.023213523048,
   "mean_realized_ev_proxy_apply_s1": 293.07591019746565,
-  "n_s2_pass_verified": 47,
-  "s2_pass_mean_open_return_pct": 23.77523191783134,
+  "n_s2_pass_verified": 48,
+  "s2_pass_mean_open_return_pct": 23.508573122795216,
   "note": "Live forward-test, not investment advice. S2 listing-day return is not the 6-month target."
 }
